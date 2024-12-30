@@ -192,14 +192,16 @@ contract FathomStablecoinProxyActions is CommonMath {
         bytes calldata _data
     ) public onlyDelegateCall {
         require(_positionAddress != address(0), "CollateralPoolConfig/zero-position-address");
-        address _stablecoin = address(IStablecoinAdapter(_adapter).stablecoin());
-        // Gets Fathom Stablecoin from the user's wallet
-        _stablecoin.safeTransferFrom(msg.sender, address(this), _stablecoinAmount);
+        if (_stablecoinAmount > 0) {
+            address _stablecoin = address(IStablecoinAdapter(_adapter).stablecoin());
+            // Gets Fathom Stablecoin from the user's wallet
+            _stablecoin.safeTransferFrom(msg.sender, address(this), _stablecoinAmount);
 
-        // Approves adapter to take the Fathom Stablecoin amount
-        _stablecoin.safeApprove(_adapter, _stablecoinAmount);
-        // Deposits Fathom Stablecoin into the bookKeeper
-        IStablecoinAdapter(_adapter).deposit(_positionAddress, _stablecoinAmount, _data);
+            // Approves adapter to take the Fathom Stablecoin amount
+            _stablecoin.safeApprove(_adapter, _stablecoinAmount);
+            // Deposits Fathom Stablecoin into the bookKeeper
+            IStablecoinAdapter(_adapter).deposit(_positionAddress, _stablecoinAmount, _data);
+        }
     }
 
     function nativeAdapterDeposit(address _adapter, address _positionAddress, bytes calldata _data) public payable onlyDelegateCall {
