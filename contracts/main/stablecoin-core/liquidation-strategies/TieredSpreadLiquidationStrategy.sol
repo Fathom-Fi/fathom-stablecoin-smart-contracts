@@ -39,6 +39,7 @@ contract TieredSpreadLiquidationStrategy is CommonMath, PausableUpgradeable, Ree
 
     struct LocalVars {
         uint256 debtAccumulatedRate; // [ray]
+        uint256 priceWithSafetyMargin; // [ray]
         uint256 closeFactorBps;
         uint256 liquidatorIncentiveBps;
         uint256 debtFloor; // [rad]
@@ -291,15 +292,23 @@ contract TieredSpreadLiquidationStrategy is CommonMath, PausableUpgradeable, Ree
     ) internal view returns (LiquidationInfo memory info) {
         LocalVars memory _vars;
         _vars.debtAccumulatedRate = ICollateralPoolConfig(bookKeeper.collateralPoolConfig()).getDebtAccumulatedRate(_collateralPoolId); // [ray]
+        _vars.priceWithSafetyMargin = ICollateralPoolConfig(bookKeeper.collateralPoolConfig()).getPriceWithSafetyMargin(
+            _collateralPoolId
+        ); // [ray]
         _vars.closeFactorBps = ICollateralPoolConfig(bookKeeper.collateralPoolConfig()).getCloseFactorBps(_collateralPoolId);
         _vars.liquidatorIncentiveBps = ICollateralPoolConfig(bookKeeper.collateralPoolConfig()).getLiquidatorIncentiveBps(_collateralPoolId);
         _vars.debtFloor = ICollateralPoolConfig(bookKeeper.collateralPoolConfig()).getDebtFloor(_collateralPoolId); // [rad]
         _vars.treasuryFeesBps = ICollateralPoolConfig(bookKeeper.collateralPoolConfig()).getTreasuryFeesBps(_collateralPoolId);
 
-        uint256 _positionDebtValue = _positionDebtShare * _vars.debtAccumulatedRate;
+        uint256 _positionDebtValue = _positionDebtShare * _vars.debtAccumulatedRate; // [rad]
+        info.debtValueToBeLiquidated = _positionDebtValue - _positionCollateralAmount * _vars.priceWithSafetyMargin; // [rad]
+        info.debtShareToBeLiquidated = info.debtValueToBeLiquidated / _vars.debtAccumulatedRate; // [wad]
 
         require(_vars.closeFactorBps > 0, "TieredSpreadLiquidationStrategy/close-factor-bps-not-set");
-        info.debtShareToBeLiquidated = (_positionDebtShare * _vars.closeFactorBps) / 10000; // [wad]
+        info.maxLiquidatableDebtShare = (_positionDebtShare * _vars.closeFactorBps) / 10000; // [wad]
+        info.debtShareToBeLiquidated = info.debtShareToBeLiquidated > info.maxLiquidatableDebtShare
+            ? info.maxLiquidatableDebtShare
+            : info.debtShareToBeLiquidated; // [wad]
         info.debtValueToBeLiquidated = info.debtShareToBeLiquidated * _vars.debtAccumulatedRate; // [rad]
 
         uint256 _collateralAmountToBeLiquidated = ((info.debtValueToBeLiquidated * _vars.liquidatorIncentiveBps) / 10000) /
