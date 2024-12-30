@@ -3,8 +3,9 @@ pragma solidity 0.8.17;
 
 import "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 import "../interfaces/IStablecoin.sol";
+import "../interfaces/IERC2612.sol";
 
-contract FathomStablecoin is IStablecoin, AccessControlUpgradeable {
+contract FathomStablecoin is IStablecoin, IERC2612, AccessControlUpgradeable {
     bytes32 public constant OWNER_ROLE = DEFAULT_ADMIN_ROLE;
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
 
@@ -13,12 +14,19 @@ contract FathomStablecoin is IStablecoin, AccessControlUpgradeable {
     // solhint-disable-next-line const-name-snakecase
     uint8 public constant decimals = 18;
 
+    /// @notice EIP-2612 permit() typehashes
+    bytes32 public constant DOMAIN_TYPE_HASH = keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    bytes32 public constant PERMIT_TYPE_HASH = keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
+
     string public name; // Fathom USD Stablecoin
     string public symbol; // FXD
     uint256 public totalSupply;
 
     mapping(address => uint256) public override balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
+
+    /// @notice EIP-2612 permit() nonces
+    mapping(address => uint256) public nonces;
 
     constructor() {
         _disableInitializers();
@@ -120,6 +128,49 @@ contract FathomStablecoin is IStablecoin, AccessControlUpgradeable {
         transferFrom(_src, _dst, _wad);
     }
 
+    /// @notice Approve an address to spend the vault's shares.
+    /// @param owner The address to approve.
+    /// @param spender The address to approve.
+    /// @param amount The amount of shares to approve.
+    /// @param deadline The deadline for the permit.
+    /// @param v The v component of the signature.
+    /// @param r The r component of the signature.
+    /// @param s The s component of the signature.
+    /// @return True if the approval was successful.
+    function permit(
+        address owner,
+        address spender,
+        uint256 amount,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external override returns (bool) {
+        if (owner == address(0)) {
+            revert ZeroAddress();
+        }
+        if (deadline < block.timestamp) {
+            revert ERC20PermitExpired();
+        }
+        uint256 nonce = nonces[owner];
+        nonces[owner]++;
+
+        bytes32 structHash = keccak256(abi.encode(PERMIT_TYPE_HASH, owner, spender, amount, nonce, deadline));
+
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), structHash));
+
+        address recoveredAddress = ecrecover(digest, v, r, s);
+        if (recoveredAddress == address(0) || recoveredAddress != owner) {
+            revert ERC20PermitInvalidSignature(recoveredAddress);
+        }
+
+        // Set the allowance to the specified amount
+        _approve(owner, spender, amount);
+
+        emit Approval(owner, spender, amount);
+        return true;
+    }
+
     /// @notice Transfer `_wad` amount of tokens from `_src` to `_dst`.
     /// @param _src The address to transfer tokens from.
     /// @param _dst The address to transfer tokens to.
@@ -138,6 +189,21 @@ contract FathomStablecoin is IStablecoin, AccessControlUpgradeable {
         balanceOf[_dst] += _wad;
         emit Transfer(_src, _dst, _wad);
         return true;
+    }
+
+    /// @notice EIP-2612 permit() domain separator.
+    // solhint-disable-next-line func-name-mixedcase
+    function DOMAIN_SEPARATOR() public view override returns (bytes32) {
+        return
+            keccak256(
+                abi.encode(
+                    DOMAIN_TYPE_HASH,
+                    keccak256(bytes(sharesName)), // "Fathom Vault" in the example
+                    keccak256(bytes(apiVersion())), // API_VERSION in the example
+                    block.chainid, // Current chain ID
+                    address(this) // Address of the contract
+                )
+            );
     }
 
     function _approve(address _owner, address _spender, uint256 _amount) internal {
