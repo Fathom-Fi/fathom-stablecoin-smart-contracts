@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.17;
 
-interface IERC1669 {
+interface IERC2612 {
     /// @notice Approve an address to spend the vault's shares.
     /// @param owner The address to approve.
     /// @param spender The address to approve.
