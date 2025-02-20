@@ -38,13 +38,17 @@ async function addCollateralPools(deployments, getChainId) {
 
   // initial collateral price as 1 USD
   await simplePriceFeed.setPrice(WeiPerWad.toString());
+  console.log("simplePriceFeed price set");
   await simplePriceFeed.setPoolId(pools.NATIVE);
+  console.log("simplePriceFeed poolId set");
   await simplePriceFeed.peekPrice();
+  console.log("simplePriceFeed peekPrice set");
   // await centralizedOraclePriceFeed.peekPrice({ gasLimit: 2000000 });
 
   await initPool(pools.NATIVE, collateralTokenAdapter.address, simplePriceFeed.address, LIQUIDATIONRATIO);
 
   await bookKeeper.setTotalDebtCeiling(debtCeilingSetUpTotal);
+  console.log("bookKeeper setTotalDebtCeiling set");
 
   async function initPool(poolId, adapter, priceFeed, liquidationRatio) {
     await collateralPoolConfig.initCollateralPool(
@@ -61,12 +65,14 @@ async function addCollateralPools(deployments, getChainId) {
       TREASURY_FEE_BPS,
       fixedSpreadLiquidationStrategy.address
     );
+    console.log("collateralPoolConfig initCollateralPool set");
 
     await priceOracle.setPrice(poolId);
+    console.log("priceOracle setPrice set");
   }
 
   log("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-  log("Collateral Pools Successfully Initialized!");
+  log("Adding Collateral Pools Finished!");
   log("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ");
 }
 

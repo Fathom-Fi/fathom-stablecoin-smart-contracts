@@ -35,6 +35,8 @@ const contracts = [
 ];
 
 async function deployProxies(deployments) {
+  const { log } = deployments;
+
   const fathomProxyFactory = await deployments.get("FathomProxyFactory");
   const fathomProxyFactoryAddress = fathomProxyFactory.address;
 
@@ -42,12 +44,17 @@ async function deployProxies(deployments) {
   const fathomProxyAdminAddress = fathomProxyAdmin.address;
 
   const fathomProxyFactoryContract = await ethers.getContractAt("FathomProxyFactory", fathomProxyFactoryAddress);
-  await Promise.all(
-    contracts.map(async (contract) => {
-      const instance = await deployments.get(contract);
-      return fathomProxyFactoryContract.createProxy(formatBytes32String(contract), instance.address, fathomProxyAdminAddress, "0x");
-    })
-  );
+
+  for (let i = 0; i < contracts.length; i++) {
+    const contract = contracts[i];
+    const instance = await deployments.get(contract);
+    await fathomProxyFactoryContract.createProxy(formatBytes32String(contract), instance.address, fathomProxyAdminAddress, "0x");
+    log(`${contract} Proxy created`);
+  }
+
+  log("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+  log("Deploying Proxies Finished!");
+  log("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ");
 }
 
 module.exports = {

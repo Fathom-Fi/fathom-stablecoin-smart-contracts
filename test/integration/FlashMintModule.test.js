@@ -6,21 +6,6 @@ const { WeiPerRay, WeiPerRad } = require("../helper/unit");
 
 const { getProxy } = require("../../common/proxies");
 
-const loadFixtureHandler = async () => {
-  return {
-    bookKeeper,
-    USDT,
-    fathomStablecoin,
-    flashMintModule,
-    flashMintArbitrager,
-    router,
-    stableSwapModule,
-    bookKeeperFlashMintArbitrager,
-    stableSwapModuleWrapper,
-    stablecoinAdapter,
-  };
-};
-
 xdescribe("FlastMintModule", () => {
   // Contracts
   let bookKeeper;

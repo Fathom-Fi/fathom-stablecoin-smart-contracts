@@ -1,5 +1,5 @@
 async function deployContracts(getNamedAccounts, deployments) {
-  const { deploy } = deployments;
+  const { deploy, log } = deployments;
   const { deployer } = await getNamedAccounts();
 
   await deploy("AccessControlConfig", {
@@ -160,6 +160,10 @@ async function deployContracts(getNamedAccounts, deployments) {
     args: [],
     log: true,
   });
+
+  log("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+  log("Deploying Contracts Finished");
+  log("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ");
 }
 
 module.exports = {

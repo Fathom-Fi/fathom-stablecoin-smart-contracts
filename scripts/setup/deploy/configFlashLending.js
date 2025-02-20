@@ -9,11 +9,10 @@ async function configFlashLending(deployments) {
   const fixedSpreadLiquidationStrategy = await getProxy(proxyFactory, "FixedSpreadLiquidationStrategy");
 
   await fixedSpreadLiquidationStrategy.setFlashLendingEnabled(true);
+  console.log("Flash lending enabled on FixedSpreadLiquidationStrategy");
 
-  log("Contracts Deployed!");
   log("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-  log("You are deploying to a local network, you'll need a local network running to interact");
-  log("Please run `npx hardhat console` to interact with the deployed smart contracts!");
+  log("Configuring flash lending finished!");
   log("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
 }
 

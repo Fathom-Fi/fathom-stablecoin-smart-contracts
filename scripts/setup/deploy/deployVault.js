@@ -6,7 +6,7 @@ const pools = require("../../../common/collateral");
 async function deployVault(getNamedAccounts, deployments, getChainId, forFixture = false) {
   const chainId = await getChainId();
   const addresses = getAddresses(chainId);
-  const { deploy } = deployments;
+  const { deploy, log } = deployments;
   const { deployer } = await getNamedAccounts();
 
   const ProxyFactory = await deployments.get("FathomProxyFactory");
@@ -25,6 +25,10 @@ async function deployVault(getNamedAccounts, deployments, getChainId, forFixture
     args: [pools.NATIVE, wnativeAddress, collateralTokenAdapter.address],
     log: true,
   });
+
+  log("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+  log("Deploying Vault finished!");
+  log("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ");
 }
 
 module.exports = {

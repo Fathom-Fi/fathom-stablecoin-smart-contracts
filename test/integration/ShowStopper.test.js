@@ -337,7 +337,6 @@ describe("ShowStopper", () => {
         expect(await bookKeeper.collateralToken(pools.NATIVE, AliceAddress)).to.be.equal("5000000000000000000");
       });
     });
-    // TODO: fix this test
     context("when redeem stablecoin with two col types", () => {
       it("should be able to accumulateStablecoin, redeemStablecoin", async () => {
         // alice's position #1

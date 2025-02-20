@@ -8,6 +8,7 @@ const WeiPerWad = BigNumber.from(`1${"0".repeat(18)}`);
 const FMM_FEE = WeiPerWad.mul(4).div(1000);
 
 async function configureFees(deployments) {
+  const { log } = deployments;
   const ProxyFactory = await deployments.get("FathomProxyFactory");
   const proxyFactory = await ethers.getContractAt("FathomProxyFactory", ProxyFactory.address);
 
@@ -19,7 +20,13 @@ async function configureFees(deployments) {
   // await stableSwapModule.setFeeOut(SSM_FEE_OUT, { gasLimit: 1000000 })
 
   await flashMintModule.setFeeRate(FMM_FEE);
+  console.log("FlashMintModule fee rate set");
   await flashMintModule.setMax(WeiPerWad.mul("1000000000"));
+  console.log("FlashMintModule max set");
+
+  log("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
+  log("Configuring fees finished!");
+  log("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! ");
 }
 
 module.exports = {

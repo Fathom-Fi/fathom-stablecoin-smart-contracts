@@ -12,12 +12,15 @@
     "deploy-local": "hardhat deploy --deploy-scripts deploy/deploy-main --network hardhat",
     "deploy-xdc": "hardhat deploy --deploy-scripts deploy/deploy-main --network xdc",
     "deploy-apothem": "hardhat deploy --deploy-scripts deploy/deploy-main --network apothem",
+    "deploy-lisk": "hardhat deploy --deploy-scripts deploy/deploy-main --network lisk",
+    "deploy-lisk-sepolia": "hardhat deploy --deploy-scripts deploy/deploy-main --network lisk-sepolia",
     "deploy-tokens-local": "hardhat deploy --deploy-scripts deploy/deploy-tokens --network hardhat",
     "deploy-tokens-xdc": "hardhat deploy --deploy-scripts deploy/deploy-tokens --network xdc",
     "deploy-tokens-apothem": "hardhat deploy --deploy-scripts deploy/deploy-tokens --network apothem",
     "deploy-add-collateral-local": "hardhat deploy --deploy-scripts deploy/deploy-add-collateral --network hardhat",
     "deploy-add-collateral-xdc": "hardhat deploy --deploy-scripts deploy/deploy-add-collateral --network xdc",
-    "deploy-add-collateral-apothem": "hardhat deploy --deploy-scripts deploy/deploy-add-collateral --network apothem"
+    "deploy-add-collateral-apothem": "hardhat deploy --deploy-scripts deploy/deploy-add-collateral --network apothem",
+    "gas-report": "hardhat test gas-report/GasReport.test.js"
   },
   "author": "",
   "license": "",
