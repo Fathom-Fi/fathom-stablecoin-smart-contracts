@@ -3,6 +3,8 @@ require("@nomicfoundation/hardhat-toolbox");
 require("hardhat-deploy");
 require("./tasks/price-feed");
 require("./tasks/fathom-solidity-sdk");
+require("./tasks/stable-swap-info");
+require("./tasks/cancel-stable-swap");
 
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
