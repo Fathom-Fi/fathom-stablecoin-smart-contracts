@@ -74,6 +74,8 @@ async function initialize(deployments, getChainId, forFixture = false) {
   await proxyWalletRegistry.initialize(proxyWalletFactory.address, bookKeeper.address);
   await flashMintModule.initialize(stablecoinAdapter.address, systemDebtEngine.address);
 
+  await flashMintModule.setDecentralizedStatesStatus(true);
+
   await stableSwapModule.initialize(
     bookKeeper.address,
     addresses.USDSTABLE,
