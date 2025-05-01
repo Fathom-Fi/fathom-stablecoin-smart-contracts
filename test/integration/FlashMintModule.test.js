@@ -98,6 +98,36 @@ describe("FlastMintModule", () => {
         expect(feeCollectedFromFlashMint).to.be.equal(parseEther("0.4").mul(WeiPerRay));
       });
     });
+
+    context("anyone should be able to call flashLoan, no need to whitelist when isDecentralizedState === true", async () => {
+      it("should success", async () => {
+        await fathomStablecoin.mint(DeployerAddress, parseEther("3500"));
+        await bookKeeper.mintUnbackedStablecoin(stablecoinAdapter.address, stablecoinAdapter.address, WeiPerRad.mul(3500));
+        await fathomStablecoin.approve(stableSwapModuleWrapper.address, parseEther("3000"));
+        await USDT.mint(DeployerAddress, parseEther("3500"));
+        await USDT.approve(stableSwapModuleWrapper.address, parseEther("3000"));
+        await stableSwapModuleWrapper.depositTokens(parseEther("3000"));
+
+        /** No need to addToWhitelist DeployerAddress since everyone can call flashLoan when isDecentralizedState == true */
+        // await flashMintModule.addToWhitelist(DeployerAddress);
+        await stableSwapModule.addToWhitelist(flashMintArbitrager.address);
+        await USDT.approve(router.address, parseEther("500"));
+        await router.deposit(USDT.address, parseEther("500"));
+        await router.setProfit(true);
+        await flashMintModule.flashLoan(
+          flashMintArbitrager.address,
+          fathomStablecoin.address,
+          parseEther("100"),
+          ethers.utils.defaultAbiCoder.encode(["address", "address", "address"], [router.address, USDT.address, stableSwapModule.address])
+        );
+
+        const profitFromArbitrage = await fathomStablecoin.balanceOf(flashMintArbitrager.address);
+        expect(profitFromArbitrage).to.be.equal(parseEther("9.49"));
+
+        const feeCollectedFromFlashMint = await bookKeeper.stablecoin(flashMintModule.address);
+        expect(feeCollectedFromFlashMint).to.be.equal(parseEther("0.4").mul(WeiPerRay));
+      });
+    });
   });
 
   describe("#bookKeeperFlashLoan", async () => {
@@ -135,6 +165,37 @@ describe("FlastMintModule", () => {
         await stableSwapModuleWrapper.depositTokens(parseEther("3000"));
 
         await flashMintModule.addToWhitelist(DeployerAddress);
+        await stableSwapModule.addToWhitelist(bookKeeperFlashMintArbitrager.address);
+        await USDT.approve(router.address, parseEther("500"));
+        await router.deposit(USDT.address, parseEther("500"));
+        await router.setProfit(true);
+
+        // Perform flash mint
+        await flashMintModule.bookKeeperFlashLoan(
+          bookKeeperFlashMintArbitrager.address,
+          parseEther("100").mul(WeiPerRay),
+          ethers.utils.defaultAbiCoder.encode(["address", "address", "address"], [router.address, USDT.address, stableSwapModule.address])
+        );
+
+        const profitFromArbitrage = await fathomStablecoin.balanceOf(bookKeeperFlashMintArbitrager.address);
+        expect(profitFromArbitrage).to.be.equal(parseEther("9.49"));
+
+        const feeCollectedFromFlashMint = await bookKeeper.stablecoin(flashMintModule.address);
+        expect(feeCollectedFromFlashMint).to.be.equal(parseEther("0.4").mul(WeiPerRay));
+      });
+    });
+
+    context("anyone should be able to call bookKeeperFlashLoan, no need to whitelist when isDecentralizedState === true", async () => {
+      it("should success", async () => {
+        await fathomStablecoin.mint(DeployerAddress, parseEther("3500"));
+        await bookKeeper.mintUnbackedStablecoin(stablecoinAdapter.address, stablecoinAdapter.address, WeiPerRad.mul(3500));
+        await fathomStablecoin.approve(stableSwapModuleWrapper.address, parseEther("3000"));
+        await USDT.mint(DeployerAddress, parseEther("3500"));
+        await USDT.approve(stableSwapModuleWrapper.address, parseEther("3000"));
+        await stableSwapModuleWrapper.depositTokens(parseEther("3000"));
+
+        /** No need to addToWhitelist DeployerAddress since everyone can call bookKeeperFlashLoan when isDecentralizedState == true */
+        // await flashMintModule.addToWhitelist(DeployerAddress);
         await stableSwapModule.addToWhitelist(bookKeeperFlashMintArbitrager.address);
         await USDT.approve(router.address, parseEther("500"));
         await router.deposit(USDT.address, parseEther("500"));
