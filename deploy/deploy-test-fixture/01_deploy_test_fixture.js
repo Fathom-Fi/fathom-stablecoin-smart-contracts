@@ -26,6 +26,8 @@ const { initialize: initializeAddCollateral } = require("../../scripts/setup/add
 const { addRoles: addRolesAddCollateral } = require("../../scripts/setup/add-collateral/addRoles");
 const { deployVault: deployVaultAddCollateral } = require("../../scripts/setup/add-collateral/deployVault");
 
+const { updateBookKeeper } = require("../../scripts/configuration/update-book-keeper/updateBookKeeper");
+
 module.exports = async ({ getNamedAccounts, deployments, getChainId }) => {
   // Setup
   await deployMocks(getNamedAccounts, deployments, getChainId);
@@ -63,6 +65,9 @@ module.exports = async ({ getNamedAccounts, deployments, getChainId }) => {
 
   // Configuration
   await addCollateralConfigPool(deployments, getChainId);
+
+  // Update BookKeeper
+  await updateBookKeeper(getNamedAccounts, deployments);
 };
 
 module.exports.tags = ["DeployTestFixture"];
