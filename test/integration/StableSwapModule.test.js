@@ -2,7 +2,7 @@ const { ethers } = require("hardhat");
 const provider = ethers.provider;
 const { expect } = require("chai");
 const { BigNumber } = ethers;
-const { time } = require("@nomicfoundation/hardhat-network-helpers");
+const { time, mine } = require("@nomicfoundation/hardhat-network-helpers");
 
 const { getProxy } = require("../../common/proxies");
 const WeiPerSixDecimals = BigNumber.from(`1${"0".repeat(6)}`);
@@ -14,6 +14,11 @@ const THIRTY_PERCENT_OF_TO_DEPOSIT = ethers.utils.parseEther("6000000");
 const ONE_PERCENT_OF_TOTAL_DEPOSIT = ethers.utils.parseEther("200000");
 const FOURTY_PERCENT_OF_TO_DEPOSIT = ethers.utils.parseEther("8000000");
 const ONE_PERCENT_OF_TOTAL_DEPOSIT_SIX_DECIMALS = WeiPerSixDecimals.mul(200000);
+
+const MIN_DELAY = 3600; // 1 hour
+const VOTING_PERIOD = 50400; // This is how long voting lasts, 1 week
+const VOTING_DELAY = 1; // How many blocks till a proposal vote becomes active
+const VOTE_WAY = 1;
 
 //why this divider:
 //right now fee is 0.001
@@ -36,6 +41,7 @@ describe("StableSwapModule", () => {
   let stableswapMultipleSwapsMock;
   let accounts;
   let DeployerAddress;
+  let governor;
 
   beforeEach(async () => {
     await deployments.fixture(["DeployTestFixture"]);
@@ -45,6 +51,9 @@ describe("StableSwapModule", () => {
 
     const ProxyFactory = await deployments.get("FathomProxyFactory");
     const proxyFactory = await ethers.getContractAt("FathomProxyFactory", ProxyFactory.address);
+
+    const Governor = await deployments.get("ProtocolGovernor");
+    governor = await ethers.getContractAt("ProtocolGovernor", Governor.address);
 
     const StableswapMultipleSwapsMock = await deployments.get("StableswapMultipleSwapsMock");
     stableswapMultipleSwapsMock = await ethers.getContractAt("StableswapMultipleSwapsMock", StableswapMultipleSwapsMock.address);
@@ -138,7 +147,31 @@ describe("StableSwapModule", () => {
         const whitelistAccount = accounts[2].address;
         await fathomStablecoin.connect(provider.getSigner(whitelistAccount)).approve(stableSwapModule.address, ethers.constants.MaxUint256);
         await fathomStablecoin.mint(whitelistAccount, TO_MINT);
-        await stableSwapModule.addToWhitelist(whitelistAccount);
+
+        let values = [0];
+        let targets = [stableSwapModule.address];
+        let calldatas = [stableSwapModule.interface.encodeFunctionData("addToWhitelist", [whitelistAccount])];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.addToWhitelist(whitelistAccount);
+
         const beforeBalanceOfStablecoin = await fathomStablecoin.balanceOf(whitelistAccount);
         const beforeBalanceOfUSDT = await USDT.balanceOf(whitelistAccount);
 
@@ -159,7 +192,31 @@ describe("StableSwapModule", () => {
         await USDT.connect(provider.getSigner(whitelistAccount)).approve(stableSwapModule.address, ethers.constants.MaxUint256);
         await USDT.mint(whitelistAccount, TO_MINT);
         await fathomStablecoin.mint(whitelistAccount, TO_MINT);
-        await stableSwapModule.addToWhitelist(whitelistAccount);
+
+        let values = [0];
+        let targets = [stableSwapModule.address];
+        let calldatas = [stableSwapModule.interface.encodeFunctionData("addToWhitelist", [whitelistAccount])];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.addToWhitelist(whitelistAccount);
+
         await stableSwapModule.connect(provider.getSigner(whitelistAccount)).swapTokenToStablecoin(whitelistAccount, WeiPerSixDecimals.mul(1000000));
       });
     });
@@ -171,11 +228,55 @@ describe("StableSwapModule", () => {
         const whitelistAccount = accounts[2].address;
         await fathomStablecoin.connect(provider.getSigner(whitelistAccount)).approve(stableSwapModule.address, ethers.constants.MaxUint256);
         await fathomStablecoin.mint(whitelistAccount, TO_MINT);
-        await stableSwapModule.addToWhitelist(whitelistAccount);
+
+        let values = [0];
+        let targets = [stableSwapModule.address];
+        let calldatas = [stableSwapModule.interface.encodeFunctionData("addToWhitelist", [whitelistAccount])];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.addToWhitelist(whitelistAccount);
         await stableSwapModule
           .connect(provider.getSigner(whitelistAccount))
           .swapStablecoinToToken(whitelistAccount, ethers.utils.parseEther("1000000"));
-        await stableSwapModule.removeFromWhitelist(whitelistAccount);
+
+        calldatas = [stableSwapModule.interface.encodeFunctionData("removeFromWhitelist", [whitelistAccount])];
+        proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.removeFromWhitelist(whitelistAccount);
         await expect(
           stableSwapModule.connect(provider.getSigner(whitelistAccount)).swapStablecoinToToken(whitelistAccount, ethers.utils.parseEther("1000000"))
         ).to.be.revertedWith("user-not-whitelisted");
@@ -188,9 +289,54 @@ describe("StableSwapModule", () => {
         await USDT.connect(provider.getSigner(whitelistAccount)).approve(stableSwapModule.address, ethers.constants.MaxUint256);
         await USDT.mint(whitelistAccount, TO_MINT);
         await fathomStablecoin.mint(whitelistAccount, TO_MINT);
-        await stableSwapModule.addToWhitelist(whitelistAccount);
+
+        let values = [0];
+        let targets = [stableSwapModule.address];
+        let calldatas = [stableSwapModule.interface.encodeFunctionData("addToWhitelist", [whitelistAccount])];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.addToWhitelist(whitelistAccount);
+
         await stableSwapModule.connect(provider.getSigner(whitelistAccount)).swapTokenToStablecoin(whitelistAccount, WeiPerSixDecimals.mul(1000000));
-        await stableSwapModule.removeFromWhitelist(whitelistAccount);
+
+        calldatas = [stableSwapModule.interface.encodeFunctionData("removeFromWhitelist", [whitelistAccount])];
+        proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.removeFromWhitelist(whitelistAccount);
         await expect(
           stableSwapModule.connect(provider.getSigner(whitelistAccount)).swapTokenToStablecoin(whitelistAccount, WeiPerSixDecimals.mul(1000000))
         ).to.be.revertedWith("user-not-whitelisted");
@@ -202,7 +348,31 @@ describe("StableSwapModule", () => {
     context("check for daily limit", async () => {
       it("Should swap tokens and revert when dailyswap limit is reached", async () => {
         //first swap which takes all the allowance
-        await stableSwapModule.setDecentralizedStatesStatus(true);
+
+        let values = [0];
+        let targets = [stableSwapModule.address];
+        let calldatas = [stableSwapModule.interface.encodeFunctionData("setDecentralizedStatesStatus", [true])];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.setDecentralizedStatesStatus(true);
+
         console.log("Swapping twenty times to check for DailyLimit Cross");
         let numberOfSwaps = 0;
         for (let i = 0; i < 10; i++) {
@@ -248,15 +418,81 @@ describe("StableSwapModule", () => {
         //again swap after increasing timestamp
         //should succeed
         await stableSwapModule.swapStablecoinToToken(DeployerAddress, ONE_PERCENT_OF_TOTAL_DEPOSIT.div(DIVIDER_TO_FIT_SINGLE_SWAP_LIMIT));
-        await stableSwapModule.initializeFeesAfterUpgrade();
-        await expect(stableSwapModule.initializeFeesAfterUpgrade()).to.be.revertedWith("StableSwapModule/already-initialized");
+
+        calldatas = [stableSwapModule.interface.encodeFunctionData("initializeFeesAfterUpgrade")];
+        proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.initializeFeesAfterUpgrade();
+
+        proposalTx = await governor.propose(targets, values, calldatas, "Initialize again");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Initialize again"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await expect(governor.execute(targets, values, calldatas, descriptionHash)).to.be.revertedWith(
+          "TimelockController: underlying transaction reverted"
+        );
       });
     });
 
     context("check for daily limit - depositToken", async () => {
       it("Should update dailyLimit on depositing more token", async () => {
         await time.increase(1);
-        await stableSwapModule.setDecentralizedStatesStatus(true);
+
+        let values = [0];
+        let targets = [stableSwapModule.address];
+        let calldatas = [stableSwapModule.interface.encodeFunctionData("setDecentralizedStatesStatus", [true])];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.setDecentralizedStatesStatus(true);
+
         await stableSwapModule.swapTokenToStablecoin(DeployerAddress, ONE_PERCENT_OF_TOTAL_DEPOSIT_SIX_DECIMALS);
         await time.increase(1);
         await stableSwapModuleWrapper.depositTokens(TO_DEPOSIT);
@@ -271,10 +507,52 @@ describe("StableSwapModule", () => {
 
     context("check for daily limit - setDailySwapLimitNumerator", async () => {
       it("Should update dailyLimit on depositing more token", async () => {
-        await stableSwapModule.setDecentralizedStatesStatus(true);
+        let values = [0];
+        let targets = [stableSwapModule.address];
+        let calldatas = [stableSwapModule.interface.encodeFunctionData("setDecentralizedStatesStatus", [true])];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.setDecentralizedStatesStatus(true);
         await stableSwapModuleWrapper.depositTokens(TO_DEPOSIT);
         await stableSwapModule.swapTokenToStablecoin(DeployerAddress, ONE_PERCENT_OF_TOTAL_DEPOSIT_SIX_DECIMALS);
-        await stableSwapModule.setDailySwapLimitNumerator(3000);
+        calldatas = [stableSwapModule.interface.encodeFunctionData("setDailySwapLimitNumerator", [3000])];
+        proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.setDailySwapLimitNumerator(3000);
         //Why GreaterThanOrEqual? Because there is one swap already done which incurs fee so total pool has increased
         const remainingDailySwapAmount = await stableSwapModule.remainingDailySwapAmount();
         expect(remainingDailySwapAmount).to.be.gte(THIRTY_PERCENT_OF_TO_DEPOSIT);
@@ -286,7 +564,29 @@ describe("StableSwapModule", () => {
     context("check for daily limit", async () => {
       it("Should revert when SingleSwap Limit is reached", async () => {
         //first swap which takes all the allowance
-        await stableSwapModule.setDecentralizedStatesStatus(true);
+        let values = [0];
+        let targets = [stableSwapModule.address];
+        let calldatas = [stableSwapModule.interface.encodeFunctionData("setDecentralizedStatesStatus", [true])];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.setDecentralizedStatesStatus(true);
         await expect(stableSwapModule.swapStablecoinToToken(DeployerAddress, ONE_PERCENT_OF_TOTAL_DEPOSIT.add(1))).to.be.revertedWith(
           "_checkSingleSwapLimit/single-swap-exceeds-limit"
         );
@@ -297,7 +597,29 @@ describe("StableSwapModule", () => {
   describe("#singleBlockLimitCheck", async () => {
     context("check for block limit", async () => {
       it("Should revert when number of swaps per block limit is reached", async () => {
-        await stableSwapModule.setDecentralizedStatesStatus(true);
+        let values = [0];
+        let targets = [stableSwapModule.address];
+        let calldatas = [stableSwapModule.interface.encodeFunctionData("setDecentralizedStatesStatus", [true])];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.setDecentralizedStatesStatus(true);
 
         await stableSwapModule.swapStablecoinToToken(DeployerAddress, ONE_PERCENT_OF_TOTAL_DEPOSIT);
         //this reverts because one user can swap only once in two blocks and we have already done one swap
@@ -315,11 +637,37 @@ describe("StableSwapModule", () => {
     context("check for block limit", async () => {
       it("Should revert when SingleSwap Limit is reached", async () => {
         //first swap which takes all the allowance
-        await stableSwapModule.setDecentralizedStatesStatus(true);
         const newNumberOfSwapsLimitPerUser = 2;
         const newBlocksPerLimit = 3;
-        await stableSwapModule.setNumberOfSwapsLimitPerUser(newNumberOfSwapsLimitPerUser);
-        await stableSwapModule.setBlocksPerLimit(newBlocksPerLimit);
+        let values = [0, 0, 0];
+        let targets = [stableSwapModule.address, stableSwapModule.address, stableSwapModule.address];
+        let calldatas = [
+          stableSwapModule.interface.encodeFunctionData("setDecentralizedStatesStatus", [true]),
+          stableSwapModule.interface.encodeFunctionData("setNumberOfSwapsLimitPerUser", [newNumberOfSwapsLimitPerUser]),
+          stableSwapModule.interface.encodeFunctionData("setBlocksPerLimit", [newBlocksPerLimit]),
+        ];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.setDecentralizedStatesStatus(true);
+        // await stableSwapModule.setNumberOfSwapsLimitPerUser(newNumberOfSwapsLimitPerUser);
+        // await stableSwapModule.setBlocksPerLimit(newBlocksPerLimit);
 
         await stableSwapModule.swapStablecoinToToken(DeployerAddress, ONE_PERCENT_OF_TOTAL_DEPOSIT);
 
@@ -339,11 +687,38 @@ describe("StableSwapModule", () => {
     context("check for block limit", async () => {
       it("Should be successful and not reach limit - setting 3 swaps per 3 blocks", async () => {
         //first swap which takes all the allowance
-        await stableSwapModule.setDecentralizedStatesStatus(true);
         const newNumberOfSwapsLimitPerUser = 3;
         const newBlocksPerLimit = 3;
-        await stableSwapModule.setNumberOfSwapsLimitPerUser(newNumberOfSwapsLimitPerUser);
-        await stableSwapModule.setBlocksPerLimit(newBlocksPerLimit);
+
+        let values = [0, 0, 0];
+        let targets = [stableSwapModule.address, stableSwapModule.address, stableSwapModule.address];
+        let calldatas = [
+          stableSwapModule.interface.encodeFunctionData("setDecentralizedStatesStatus", [true]),
+          stableSwapModule.interface.encodeFunctionData("setNumberOfSwapsLimitPerUser", [newNumberOfSwapsLimitPerUser]),
+          stableSwapModule.interface.encodeFunctionData("setBlocksPerLimit", [newBlocksPerLimit]),
+        ];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.setDecentralizedStatesStatus(true);
+        // await stableSwapModule.setNumberOfSwapsLimitPerUser(newNumberOfSwapsLimitPerUser);
+        // await stableSwapModule.setBlocksPerLimit(newBlocksPerLimit);
 
         await stableSwapModule.swapStablecoinToToken(DeployerAddress, ONE_PERCENT_OF_TOTAL_DEPOSIT);
 
@@ -366,12 +741,38 @@ describe("StableSwapModule", () => {
     context("check for block limit", async () => {
       it("Should revert for extra swap in the limit and then again be sucessful after enough block passes", async () => {
         //first swap which takes all the allowance
-        await stableSwapModule.setDecentralizedStatesStatus(true);
         const newNumberOfSwapsLimitPerUser = 3;
         const newBlocksPerLimit = 10;
         const blockNumbersToReachForNextSwap = 12;
-        await stableSwapModule.setNumberOfSwapsLimitPerUser(newNumberOfSwapsLimitPerUser);
-        await stableSwapModule.setBlocksPerLimit(newBlocksPerLimit);
+        let values = [0, 0, 0];
+        let targets = [stableSwapModule.address, stableSwapModule.address, stableSwapModule.address];
+        let calldatas = [
+          stableSwapModule.interface.encodeFunctionData("setDecentralizedStatesStatus", [true]),
+          stableSwapModule.interface.encodeFunctionData("setNumberOfSwapsLimitPerUser", [newNumberOfSwapsLimitPerUser]),
+          stableSwapModule.interface.encodeFunctionData("setBlocksPerLimit", [newBlocksPerLimit]),
+        ];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.setDecentralizedStatesStatus(true);
+        // await stableSwapModule.setNumberOfSwapsLimitPerUser(newNumberOfSwapsLimitPerUser);
+        // await stableSwapModule.setBlocksPerLimit(newBlocksPerLimit);
 
         await stableSwapModule.swapStablecoinToToken(DeployerAddress, ONE_PERCENT_OF_TOTAL_DEPOSIT);
         await stableSwapModule.swapStablecoinToToken(
@@ -404,9 +805,57 @@ describe("StableSwapModule", () => {
   describe("#stableSwapEmergencyWithdraw", async () => {
     context("emergency withdraw", async () => {
       it("Should emergency withdraw when paused", async () => {
-        await expect(stableSwapModule.emergencyWithdraw(accounts[5].address)).to.be.reverted;
-        await stableSwapModule.pause();
-        await stableSwapModule.emergencyWithdraw(accounts[5].address);
+        let values = [0];
+        let targets = [stableSwapModule.address];
+        let calldatas = [stableSwapModule.interface.encodeFunctionData("emergencyWithdraw", [accounts[5].address])];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await expect(governor.execute(targets, values, calldatas, descriptionHash)).to.be.reverted;
+        // await expect(stableSwapModule.emergencyWithdraw(accounts[5].address)).to.be.reverted;
+
+        values = [0, 0];
+        targets = [stableSwapModule.address, stableSwapModule.address];
+        calldatas = [
+          stableSwapModule.interface.encodeFunctionData("pause"),
+          stableSwapModule.interface.encodeFunctionData("emergencyWithdraw", [accounts[5].address]),
+        ];
+        proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.pause();
+        // await stableSwapModule.emergencyWithdraw(accounts[5].address);
         const balanceOfStablecoin = await fathomStablecoin.balanceOf(accounts[5].address);
         const balanceOfToken = await USDT.balanceOf(accounts[5].address);
         expect(balanceOfStablecoin).to.be.equal(ethers.utils.parseEther("10000000"));
@@ -418,7 +867,30 @@ describe("StableSwapModule", () => {
   describe("#StableswapMultipleSwapsMock", async () => {
     context("twoStablecoinToTokenSwapAtSameBlock- swap tokens in same block", async () => {
       it("should revert if we swap tokens in same block", async () => {
-        await stableSwapModule.setDecentralizedStatesStatus(true);
+        let values = [0];
+        let targets = [stableSwapModule.address];
+        let calldatas = [stableSwapModule.interface.encodeFunctionData("setDecentralizedStatesStatus", [true])];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.setDecentralizedStatesStatus(true);
+
         await fathomStablecoin.approve(stableswapMultipleSwapsMock.address, ethers.constants.MaxUint256);
         await expect(
           stableswapMultipleSwapsMock.twoStablecoinToTokenSwapAtSameBlock(
@@ -432,7 +904,30 @@ describe("StableSwapModule", () => {
 
     context("twoTokenToStablecoinSwapAtSameBlock- swap tokens in same block", async () => {
       it("should revert if we swap tokens in same block", async () => {
-        await stableSwapModule.setDecentralizedStatesStatus(true);
+        let values = [0];
+        let targets = [stableSwapModule.address];
+        let calldatas = [stableSwapModule.interface.encodeFunctionData("setDecentralizedStatesStatus", [true])];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.setDecentralizedStatesStatus(true);
+
         await USDT.approve(stableswapMultipleSwapsMock.address, ethers.constants.MaxUint256);
         await expect(
           stableswapMultipleSwapsMock.twoTokenToStablecoinSwapAtSameBlock(
@@ -445,11 +940,37 @@ describe("StableSwapModule", () => {
     });
     context("twoStablecoinToTokenSwapAtSameBlock- swap tokens in same block", async () => {
       it("Should be successful for two swaps in same block", async () => {
-        await stableSwapModule.setDecentralizedStatesStatus(true);
         const newNumberOfSwapsLimitPerUser = 3;
         const newBlocksPerLimit = 1;
-        await stableSwapModule.setNumberOfSwapsLimitPerUser(newNumberOfSwapsLimitPerUser);
-        await stableSwapModule.setBlocksPerLimit(newBlocksPerLimit);
+        let values = [0, 0, 0];
+        let targets = [stableSwapModule.address, stableSwapModule.address, stableSwapModule.address];
+        let calldatas = [
+          stableSwapModule.interface.encodeFunctionData("setDecentralizedStatesStatus", [true]),
+          stableSwapModule.interface.encodeFunctionData("setNumberOfSwapsLimitPerUser", [newNumberOfSwapsLimitPerUser]),
+          stableSwapModule.interface.encodeFunctionData("setBlocksPerLimit", [newBlocksPerLimit]),
+        ];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.setDecentralizedStatesStatus(true);
+        // await stableSwapModule.setNumberOfSwapsLimitPerUser(newNumberOfSwapsLimitPerUser);
+        // await stableSwapModule.setBlocksPerLimit(newBlocksPerLimit);
 
         await fathomStablecoin.approve(stableswapMultipleSwapsMock.address, ethers.constants.MaxUint256);
         await stableswapMultipleSwapsMock.twoStablecoinToTokenSwapAtSameBlock(
@@ -462,11 +983,37 @@ describe("StableSwapModule", () => {
 
     context("twoTokenToStablecoinSwapAtSameBlock- swap tokens in same block", async () => {
       it("Should be successful for two swaps in same block", async () => {
-        await stableSwapModule.setDecentralizedStatesStatus(true);
         const newNumberOfSwapsLimitPerUser = 3;
         const newBlocksPerLimit = 1;
-        await stableSwapModule.setNumberOfSwapsLimitPerUser(newNumberOfSwapsLimitPerUser);
-        await stableSwapModule.setBlocksPerLimit(newBlocksPerLimit);
+        let values = [0, 0, 0];
+        let targets = [stableSwapModule.address, stableSwapModule.address, stableSwapModule.address];
+        let calldatas = [
+          stableSwapModule.interface.encodeFunctionData("setDecentralizedStatesStatus", [true]),
+          stableSwapModule.interface.encodeFunctionData("setNumberOfSwapsLimitPerUser", [newNumberOfSwapsLimitPerUser]),
+          stableSwapModule.interface.encodeFunctionData("setBlocksPerLimit", [newBlocksPerLimit]),
+        ];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.setDecentralizedStatesStatus(true);
+        // await stableSwapModule.setNumberOfSwapsLimitPerUser(newNumberOfSwapsLimitPerUser);
+        // await stableSwapModule.setBlocksPerLimit(newBlocksPerLimit);
 
         await USDT.approve(stableswapMultipleSwapsMock.address, ethers.constants.MaxUint256);
         await stableswapMultipleSwapsMock.twoTokenToStablecoinSwapAtSameBlock(
@@ -515,7 +1062,29 @@ describe("StableSwapModule", () => {
     context("update total value deposited after upgrade", async () => {
       it("totalValueDeposited: should be same before and after upgrade", async () => {
         const totalValueDepositedBeforeUpdate = await stableSwapModule.totalValueDeposited();
-        await stableSwapModule.udpateTotalValueDeposited();
+        let values = [0];
+        let targets = [stableSwapModule.address];
+        let calldatas = [stableSwapModule.interface.encodeFunctionData("udpateTotalValueDeposited")];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.udpateTotalValueDeposited();
         const totalValueDepositedAfterUpdate = await stableSwapModule.totalValueDeposited();
         expect(totalValueDepositedAfterUpdate).to.be.equal(totalValueDepositedBeforeUpdate);
       });
@@ -525,7 +1094,29 @@ describe("StableSwapModule", () => {
   describe("#unitTests", async () => {
     context("exceed single swap limit", () => {
       it("should revert after setting decentralized state - single swap limit - swapStablecoinToToken", async () => {
-        await stableSwapModule.setDecentralizedStatesStatus(true);
+        let values = [0];
+        let targets = [stableSwapModule.address];
+        let calldatas = [stableSwapModule.interface.encodeFunctionData("setDecentralizedStatesStatus", [true])];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.setDecentralizedStatesStatus(true);
         await expect(stableSwapModule.swapStablecoinToToken(DeployerAddress, ONE_PERCENT_OF_TOTAL_DEPOSIT.add(1))).to.be.revertedWith(
           "_checkSingleSwapLimit/single-swap-exceeds-limit"
         );
@@ -534,7 +1125,29 @@ describe("StableSwapModule", () => {
 
     context("exceed single swap limit", () => {
       it("should revert after setting decentralized state - single swap limit - swapTokenToStablecoin", async () => {
-        await stableSwapModule.setDecentralizedStatesStatus(true);
+        let values = [0];
+        let targets = [stableSwapModule.address];
+        let calldatas = [stableSwapModule.interface.encodeFunctionData("setDecentralizedStatesStatus", [true])];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModule.setDecentralizedStatesStatus(true);
         await expect(stableSwapModule.swapTokenToStablecoin(DeployerAddress, ONE_PERCENT_OF_TOTAL_DEPOSIT_SIX_DECIMALS.add(1))).to.be.revertedWith(
           "_checkSingleSwapLimit/single-swap-exceeds-limit"
         );

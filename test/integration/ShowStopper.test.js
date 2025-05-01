@@ -1,14 +1,18 @@
 const { ethers } = require("hardhat");
 const provider = ethers.provider;
 const { expect } = require("chai");
-const { smock } = require("@defi-wonderland/smock");
-const { time } = require("@nomicfoundation/hardhat-network-helpers");
+const { time, mine } = require("@nomicfoundation/hardhat-network-helpers");
 
 const { WeiPerRad, WeiPerRay, WeiPerWad } = require("../helper/unit");
 const { createProxyWallets } = require("../helper/proxy-wallets");
 const PositionHelper = require("../helper/positions");
 const { getProxy } = require("../../common/proxies");
 const pools = require("../../common/collateral");
+
+const MIN_DELAY = 3600; // 1 hour
+const VOTING_PERIOD = 50400; // This is how long voting lasts, 1 week
+const VOTING_DELAY = 1; // How many blocks till a proposal vote becomes active
+const VOTE_WAY = 1;
 
 const WeekInSeconds = 604800;
 
@@ -29,19 +33,25 @@ describe("ShowStopper", () => {
   let collateralTokenAdapter;
   let MockCollateralTokenAdapter;
   let WXDC;
+  let governor;
 
+  let DeployerAddress;
   let AliceAddress;
   let BobAddress;
 
   beforeEach(async () => {
     await deployments.fixture(["DeployTestFixture"]);
 
-    const { allice, bob } = await getNamedAccounts();
+    const { deployer, allice, bob } = await getNamedAccounts();
+    DeployerAddress = deployer;
     AliceAddress = allice;
     BobAddress = bob;
 
     const ProxyFactory = await deployments.get("FathomProxyFactory");
     const proxyFactory = await ethers.getContractAt("FathomProxyFactory", ProxyFactory.address);
+
+    const Governor = await deployments.get("ProtocolGovernor");
+    governor = await ethers.getContractAt("ProtocolGovernor", Governor.address);
 
     bookKeeper = await getProxy(proxyFactory, "BookKeeper");
     liquidationEngine = await getProxy(proxyFactory, "LiquidationEngine");
@@ -61,14 +71,42 @@ describe("ShowStopper", () => {
     MockCollateralTokenAdapter = await ethers.getContractAt("MockCollateralTokenAdapter", _MockCollateralTokenAdapter.address);
 
     const proxyWalletRegistry = await getProxy(proxyFactory, "ProxyWalletRegistry");
-    await proxyWalletRegistry.setDecentralizedMode(true);
+
+    let values = [0, 0, 0];
+    let targets = [proxyWalletRegistry.address, collateralPoolConfig.address, collateralPoolConfig.address];
+    let calldatas = [
+      proxyWalletRegistry.interface.encodeFunctionData("setDecentralizedMode", [true]),
+      collateralPoolConfig.interface.encodeFunctionData("setStabilityFeeRate", [pools.XDC, WeiPerRay]),
+      collateralPoolConfig.interface.encodeFunctionData("setStabilityFeeRate", [pools.WXDC, WeiPerRay]),
+    ];
+    const proposalTx = await governor.propose(targets, values, calldatas, "Set Config");
+    const proposalReceipt = await proposalTx.wait();
+    const proposalId = proposalReceipt.events[0].args.proposalId;
+
+    // wait for the voting period to pass
+    await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+    await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+    await mine(VOTING_PERIOD + 1);
+
+    // Queue the TX
+    const descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set Config"));
+    await governor.queue(targets, values, calldatas, descriptionHash);
+
+    await time.increase(MIN_DELAY + 1);
+    await mine(1);
+
+    // Execute
+    await governor.execute(targets, values, calldatas, descriptionHash);
+    // await proxyWalletRegistry.setDecentralizedMode(true);
 
     ({
       proxyWallets: [aliceProxyWallet, bobProxyWallet],
     } = await createProxyWallets([AliceAddress, BobAddress]));
 
-    await collateralPoolConfig.setStabilityFeeRate(pools.XDC, WeiPerRay);
-    await collateralPoolConfig.setStabilityFeeRate(pools.WXDC, WeiPerRay);
+    // await collateralPoolConfig.setStabilityFeeRate(pools.XDC, WeiPerRay);
+    // await collateralPoolConfig.setStabilityFeeRate(pools.WXDC, WeiPerRay);
 
     await fathomStablecoin.connect(provider.getSigner(AliceAddress)).approve(stablecoinAdapter.address, WeiPerWad.mul(10000));
   });
@@ -76,13 +114,60 @@ describe("ShowStopper", () => {
   describe("#cage", () => {
     context("when doesn't grant showStopperRole for showStopper", () => {
       it("should be revert", async () => {
-        await accessControlConfig.revokeRole(await accessControlConfig.SHOW_STOPPER_ROLE(), showStopper.address);
-        await expect(showStopper.cage(WeekInSeconds)).to.be.revertedWith("!(ownerRole or showStopperRole)");
+        const values = [0, 0];
+        const targets = [accessControlConfig.address, showStopper.address];
+        const calldatas = [
+          accessControlConfig.interface.encodeFunctionData("revokeRole", [await accessControlConfig.SHOW_STOPPER_ROLE(), showStopper.address]),
+          showStopper.interface.encodeFunctionData("cage", [WeekInSeconds]),
+        ];
+        const proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        const proposalReceipt = await proposalTx.wait();
+        const proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        const descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await expect(governor.execute(targets, values, calldatas, descriptionHash)).to.be.revertedWith(
+          "TimelockController: underlying transaction reverted"
+        );
       });
     });
     context("when grant showStopperRole for all contract", () => {
       it("should be able to cage", async () => {
-        await showStopper.cage(WeekInSeconds);
+        const values = [0];
+        const targets = [showStopper.address];
+        const calldatas = [showStopper.interface.encodeFunctionData("cage", [WeekInSeconds])];
+        const proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        const proposalReceipt = await proposalTx.wait();
+        const proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        const descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await showStopper.cage(WeekInSeconds);
 
         expect(await bookKeeper.live()).to.be.equal(0);
         expect(await liquidationEngine.live()).to.be.equal(0);
@@ -92,8 +177,30 @@ describe("ShowStopper", () => {
     });
     context("when some contract was already caged", () => {
       it("should be able to cage", async () => {
-        await systemDebtEngine.cage();
-        await showStopper.cage(WeekInSeconds);
+        const values = [0, 0];
+        const targets = [systemDebtEngine.address, showStopper.address];
+        const calldatas = [systemDebtEngine.interface.encodeFunctionData("cage"), showStopper.interface.encodeFunctionData("cage", [WeekInSeconds])];
+        const proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        const proposalReceipt = await proposalTx.wait();
+        const proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        const descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await systemDebtEngine.cage();
+        // await showStopper.cage(WeekInSeconds);
 
         expect(await bookKeeper.live()).to.be.equal(0);
         expect(await liquidationEngine.live()).to.be.equal(0);
@@ -111,8 +218,34 @@ describe("ShowStopper", () => {
         //  c. mint FXD
         await PositionHelper.openXDCPositionAndDraw(aliceProxyWallet, AliceAddress, pools.XDC, WeiPerWad.mul(10), WeiPerWad.mul(5));
 
-        await showStopper.cage(WeekInSeconds);
-        await showStopper.cagePool(pools.XDC);
+        const values = [0, 0];
+        const targets = [showStopper.address, showStopper.address];
+        const calldatas = [
+          showStopper.interface.encodeFunctionData("cage", [WeekInSeconds]),
+          showStopper.interface.encodeFunctionData("cagePool", [pools.XDC]),
+        ];
+        const proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        const proposalReceipt = await proposalTx.wait();
+        const proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        const descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+
+        // await showStopper.cage(WeekInSeconds);
+        // await showStopper.cagePool(pools.XDC);
 
         expect(await showStopper.cagePrice(pools.XDC)).to.be.equal(WeiPerRay);
         expect(await showStopper.totalDebtShare(pools.XDC)).to.be.equal(WeiPerWad.mul(5));
@@ -122,9 +255,36 @@ describe("ShowStopper", () => {
       it("should be able to cage", async () => {
         await PositionHelper.openXDCPositionAndDraw(aliceProxyWallet, AliceAddress, pools.XDC, WeiPerWad.mul(10), WeiPerWad.mul(5));
 
-        await bookKeeper.cage();
-        await showStopper.cage(WeekInSeconds);
-        await showStopper.cagePool(pools.XDC);
+        const values = [0, 0, 0];
+        const targets = [bookKeeper.address, showStopper.address, showStopper.address];
+        const calldatas = [
+          bookKeeper.interface.encodeFunctionData("cage"),
+          showStopper.interface.encodeFunctionData("cage", [WeekInSeconds]),
+          showStopper.interface.encodeFunctionData("cagePool", [pools.XDC]),
+        ];
+        const proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        const proposalReceipt = await proposalTx.wait();
+        const proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        const descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+
+        // await bookKeeper.cage();
+        // await showStopper.cage(WeekInSeconds);
+        // await showStopper.cagePool(pools.XDC);
 
         expect(await showStopper.cagePrice(pools.XDC)).to.be.equal(WeiPerRay);
         expect(await showStopper.totalDebtShare(pools.XDC)).to.be.equal(WeiPerWad.mul(5));
@@ -144,9 +304,35 @@ describe("ShowStopper", () => {
         const positionId = await positionManager.ownerLastPositionId(aliceProxyWallet.address);
         const positionAddress = await positionManager.positions(positionId);
 
-        await showStopper.cage(WeekInSeconds);
+        const values = [0, 0];
+        const targets = [showStopper.address, showStopper.address];
+        const calldatas = [
+          showStopper.interface.encodeFunctionData("cage", [WeekInSeconds]),
+          showStopper.interface.encodeFunctionData("cagePool", [pools.XDC]),
+        ];
+        const proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        const proposalReceipt = await proposalTx.wait();
+        const proposalId = proposalReceipt.events[0].args.proposalId;
 
-        await showStopper.cagePool(pools.XDC);
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        const descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+
+        // await showStopper.cage(WeekInSeconds);
+
+        // await showStopper.cagePool(pools.XDC);
 
         // accumulate bad debt posiion #1
         await showStopper.accumulateBadDebt(pools.XDC, positionAddress);
@@ -171,9 +357,35 @@ describe("ShowStopper", () => {
         const positionId2 = await positionManager.ownerLastPositionId(bobProxyWallet.address);
         const positionAddress2 = await positionManager.positions(positionId2);
 
-        await showStopper.cage(WeekInSeconds);
+        let values = [0, 0];
+        let targets = [showStopper.address, showStopper.address];
+        let calldatas = [
+          showStopper.interface.encodeFunctionData("cage", [WeekInSeconds]),
+          showStopper.interface.encodeFunctionData("cagePool", [pools.XDC]),
+        ];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
 
-        await showStopper.cagePool(pools.XDC);
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+
+        // await showStopper.cage(WeekInSeconds);
+
+        // await showStopper.cagePool(pools.XDC);
 
         // accumulate bad debt posiion #1
         await showStopper.accumulateBadDebt(pools.XDC, positionAddress);
@@ -202,7 +414,30 @@ describe("ShowStopper", () => {
 
         expect((await bookKeeper.positions(pools.XDC, positionAddress2)).lockedCollateral).to.be.equal(0);
         expect(await bookKeeper.collateralToken(pools.XDC, bobProxyWallet.address)).to.be.equal(WeiPerWad.mul(5));
-        await collateralTokenAdapter.cage();
+
+        values = [0];
+        targets = [collateralTokenAdapter.address];
+        calldatas = [collateralTokenAdapter.interface.encodeFunctionData("cage")];
+        proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await collateralTokenAdapter.cage();
 
         // emergency withdraw position #1
         await PositionHelper.emergencyWithdraw(aliceProxyWallet, AliceAddress, collateralTokenAdapter.address);
@@ -236,9 +471,34 @@ describe("ShowStopper", () => {
         const positionId2 = await positionManager.ownerLastPositionId(bobProxyWallet.address);
         const positionAddress2 = await positionManager.positions(positionId2);
 
-        await showStopper.cage(WeekInSeconds);
+        let values = [0, 0];
+        let targets = [showStopper.address, showStopper.address];
+        let calldatas = [
+          showStopper.interface.encodeFunctionData("cage", [WeekInSeconds]),
+          showStopper.interface.encodeFunctionData("cagePool", [pools.XDC]),
+        ];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
 
-        await showStopper.cagePool(pools.XDC);
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+
+        // await showStopper.cage(WeekInSeconds);
+        // await showStopper.cagePool(pools.XDC);
 
         // accumulate bad debt posiion #1
         await showStopper.accumulateBadDebt(pools.XDC, positionAddress);
@@ -293,9 +553,34 @@ describe("ShowStopper", () => {
         const positionId2 = await positionManager.ownerLastPositionId(bobProxyWallet.address);
         const positionAddress2 = await positionManager.positions(positionId2);
 
-        await showStopper.cage(WeekInSeconds);
+        let values = [0, 0];
+        let targets = [showStopper.address, showStopper.address];
+        let calldatas = [
+          showStopper.interface.encodeFunctionData("cage", [WeekInSeconds]),
+          showStopper.interface.encodeFunctionData("cagePool", [pools.XDC]),
+        ];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
 
-        await showStopper.cagePool(pools.XDC);
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+
+        // await showStopper.cage(WeekInSeconds);
+        // await showStopper.cagePool(pools.XDC);
 
         // accumulate bad debt posiion #1
         await showStopper.accumulateBadDebt(pools.XDC, positionAddress);
@@ -338,7 +623,6 @@ describe("ShowStopper", () => {
         expect(await bookKeeper.collateralToken(pools.XDC, AliceAddress)).to.be.equal("5000000000000000000");
       });
     });
-    // TODO: fix this test
     context("when redeem stablecoin with two col types", () => {
       it("should be able to accumulateStablecoin, redeemStablecoin", async () => {
         // alice's position #1
@@ -381,11 +665,36 @@ describe("ShowStopper", () => {
         const positionId4 = await positionManager.ownerLastPositionId(bobProxyWallet.address);
         const positionAddress4 = await positionManager.positions(positionId4);
 
-        await showStopper.cage(WeekInSeconds);
+        let values = [0, 0, 0];
+        let targets = [showStopper.address, showStopper.address, showStopper.address];
+        let calldatas = [
+          showStopper.interface.encodeFunctionData("cage", [WeekInSeconds]),
+          showStopper.interface.encodeFunctionData("cagePool", [pools.XDC]),
+          showStopper.interface.encodeFunctionData("cagePool", [pools.WXDC]),
+        ];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
 
-        await showStopper.cagePool(pools.XDC);
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
 
-        await showStopper.cagePool(pools.WXDC);
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+
+        // await showStopper.cage(WeekInSeconds);
+        // await showStopper.cagePool(pools.XDC);
+        // await showStopper.cagePool(pools.WXDC);
 
         // accumulate bad debt posiion #1
         await showStopper.accumulateBadDebt(pools.XDC, positionAddress);
@@ -449,10 +758,35 @@ describe("ShowStopper", () => {
         await showStopper.connect(provider.getSigner(AliceAddress)).redeemStablecoin(pools.WXDC, WeiPerWad.mul(5));
         expect(await bookKeeper.collateralToken(pools.WXDC, AliceAddress)).to.be.equal("2500000000000000000");
 
-        await collateralTokenAdapter.cage();
+        values = [0, 0];
+        targets = [collateralTokenAdapter.address, MockCollateralTokenAdapter.address];
+        calldatas = [collateralTokenAdapter.interface.encodeFunctionData("cage"), MockCollateralTokenAdapter.interface.encodeFunctionData("cage")];
+        proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await collateralTokenAdapter.cage();
+
         await collateralTokenAdapter.connect(provider.getSigner(AliceAddress)).emergencyWithdraw(AliceAddress);
         expect(await WXDC.balanceOf(AliceAddress)).to.be.equal("2500000000000000000");
-        await MockCollateralTokenAdapter.cage();
+
+        // await MockCollateralTokenAdapter.cage();
+
         await MockCollateralTokenAdapter.connect(provider.getSigner(AliceAddress)).emergencyWithdraw(AliceAddress);
         expect(await WXDC.balanceOf(AliceAddress)).to.be.equal("5000000000000000000");
       });

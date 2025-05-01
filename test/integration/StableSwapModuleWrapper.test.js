@@ -3,7 +3,7 @@ const provider = ethers.provider;
 const { expect } = require("chai");
 const { BigNumber } = ethers;
 const { MaxUint256 } = ethers.constants;
-const { time } = require("@nomicfoundation/hardhat-network-helpers");
+const { time, mine } = require("@nomicfoundation/hardhat-network-helpers");
 
 const { getProxy } = require("../../common/proxies");
 const { WeiPerWad } = require("../helper/unit");
@@ -18,6 +18,11 @@ const TO_MINT = ethers.utils.parseEther("20000000");
 
 const ONE_PERCENT_OF_TOTAL_DEPOSIT = ethers.utils.parseEther("100000");
 const ONE_PERCENT_OF_TOTAL_DEPOSIT_SIX_DECIMALS = WeiPerSixDecimals.mul(100000);
+
+const MIN_DELAY = 3600; // 1 hour
+const VOTING_PERIOD = 50400; // This is how long voting lasts, 1 week
+const VOTING_DELAY = 1; // How many blocks till a proposal vote becomes active
+const VOTE_WAY = 1;
 
 //why this divider:
 //right now fee is 0.001
@@ -48,6 +53,7 @@ describe("StableSwapModuleWrapper", () => {
   let fathomStablecoin;
   let stableSwapModuleWrapper;
   let stableswapMultipleSwapsMock;
+  let governor;
 
   let accounts;
   let DeployerAddress;
@@ -62,6 +68,9 @@ describe("StableSwapModuleWrapper", () => {
 
     const ProxyFactory = await deployments.get("FathomProxyFactory");
     const proxyFactory = await ethers.getContractAt("FathomProxyFactory", ProxyFactory.address);
+
+    const Governor = await deployments.get("ProtocolGovernor");
+    governor = await ethers.getContractAt("ProtocolGovernor", Governor.address);
 
     const StableswapMultipleSwapsMock = await deployments.get("StableswapMultipleSwapsMock");
     stableswapMultipleSwapsMock = await ethers.getContractAt("StableswapMultipleSwapsMock", StableswapMultipleSwapsMock.address);
@@ -111,7 +120,30 @@ describe("StableSwapModuleWrapper", () => {
 
     context("Should let whitelisted people deposit Tokens", () => {
       it("Should deposit from whitelisted address", async () => {
-        await stableSwapModuleWrapper.addToWhitelist(accounts[2].address);
+        let values = [0];
+        let targets = [stableSwapModuleWrapper.address];
+        let calldatas = [stableSwapModuleWrapper.interface.encodeFunctionData("addToWhitelist", [accounts[2].address])];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModuleWrapper.addToWhitelist(accounts[2].address);
+
         await USDT.connect(provider.getSigner(accounts[2].address)).approve(stableSwapModuleWrapper.address, MaxUint256);
         await fathomStablecoin.connect(provider.getSigner(accounts[2].address)).approve(stableSwapModuleWrapper.address, MaxUint256);
         await USDT.mint(accounts[2].address, TO_DEPOSIT_USD);
@@ -120,13 +152,58 @@ describe("StableSwapModuleWrapper", () => {
       });
 
       it("Should deposit from whitelisted address and after its removed from whitelist, should revert", async () => {
-        await stableSwapModuleWrapper.addToWhitelist(accounts[2].address);
+        let values = [0];
+        let targets = [stableSwapModuleWrapper.address];
+        let calldatas = [stableSwapModuleWrapper.interface.encodeFunctionData("addToWhitelist", [accounts[2].address])];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModuleWrapper.addToWhitelist(accounts[2].address);
+
         await USDT.connect(provider.getSigner(accounts[2].address)).approve(stableSwapModuleWrapper.address, MaxUint256);
         await fathomStablecoin.connect(provider.getSigner(accounts[2].address)).approve(stableSwapModuleWrapper.address, MaxUint256);
         await USDT.mint(accounts[2].address, TO_DEPOSIT_USD);
         await fathomStablecoin.mint(accounts[2].address, TO_DEPOSIT);
         await stableSwapModuleWrapper.connect(provider.getSigner(accounts[2].address)).depositTokens(TO_DEPOSIT);
-        await stableSwapModuleWrapper.removeFromWhitelist(accounts[2].address);
+
+        calldatas = [stableSwapModuleWrapper.interface.encodeFunctionData("removeFromWhitelist", [accounts[2].address])];
+        proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModuleWrapper.removeFromWhitelist(accounts[2].address);
+
         await expect(stableSwapModuleWrapper.connect(provider.getSigner(accounts[2].address)).depositTokens(TO_DEPOSIT)).to.be.revertedWith(
           "user-not-whitelisted"
         );
@@ -137,7 +214,30 @@ describe("StableSwapModuleWrapper", () => {
   describe("#ShouldDepositTokensAndSwap", async () => {
     context("Should let whitelisted people deposit Tokens and then swap", () => {
       it("Should deposit", async () => {
-        await stableSwapModuleWrapper.addToWhitelist(accounts[2].address);
+        let values = [0];
+        let targets = [stableSwapModuleWrapper.address];
+        let calldatas = [stableSwapModuleWrapper.interface.encodeFunctionData("addToWhitelist", [accounts[2].address])];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModuleWrapper.addToWhitelist(accounts[2].address);
+
         await USDT.connect(provider.getSigner(accounts[2].address)).approve(stableSwapModuleWrapper.address, MaxUint256);
         await fathomStablecoin.connect(provider.getSigner(accounts[2].address)).approve(stableSwapModuleWrapper.address, MaxUint256);
         await USDT.mint(accounts[2].address, TO_DEPOSIT_USD);
@@ -159,9 +259,34 @@ describe("StableSwapModuleWrapper", () => {
           let TOTAL_FXD_BALANCE_AFTER_DEPOSIT = Array.from(Array(5));
           let TOTAL_TOKEN_BALANCE_AFTER_DEPOSIT = Array.from(Array(5));
 
+          let values = [0];
+          let targets = [stableSwapModuleWrapper.address];
+          let calldatas = [];
+
           for (let i = 1; i < 5; i++) {
             console.log(`depositing for account [${i}]`);
-            await stableSwapModuleWrapper.addToWhitelist(accounts[i].address);
+            calldatas = [stableSwapModuleWrapper.interface.encodeFunctionData("addToWhitelist", [accounts[i].address])];
+            let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+            let proposalReceipt = await proposalTx.wait();
+            let proposalId = proposalReceipt.events[0].args.proposalId;
+
+            // wait for the voting period to pass
+            await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+            await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+            await mine(VOTING_PERIOD + 1);
+
+            // Queue the TX
+            let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+            await governor.queue(targets, values, calldatas, descriptionHash);
+
+            await time.increase(MIN_DELAY + 1);
+            await mine(1);
+
+            await governor.execute(targets, values, calldatas, descriptionHash);
+            // await stableSwapModuleWrapper.addToWhitelist(accounts[i].address);
+
             await USDT.connect(provider.getSigner(accounts[i].address)).approve(stableSwapModuleWrapper.address, MaxUint256);
             await fathomStablecoin.connect(provider.getSigner(accounts[i].address)).approve(stableSwapModuleWrapper.address, MaxUint256);
             await USDT.mint(accounts[i].address, TOTAL_DEPOSIT_FOR_EACH_ACCOUNT_USD);
@@ -215,7 +340,31 @@ describe("StableSwapModuleWrapper", () => {
 
           //checking if updatingTotalValueDepositedWorks
           const totalValueDepositedBeforeUpdate = await stableSwapModule.totalValueDeposited();
-          await stableSwapModule.udpateTotalValueDeposited();
+
+          values = [0];
+          targets = [stableSwapModule.address];
+          calldatas = [stableSwapModule.interface.encodeFunctionData("udpateTotalValueDeposited")];
+          let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+          let proposalReceipt = await proposalTx.wait();
+          let proposalId = proposalReceipt.events[0].args.proposalId;
+
+          // wait for the voting period to pass
+          await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+          await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+          await mine(VOTING_PERIOD + 1);
+
+          // Queue the TX
+          let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+          await governor.queue(targets, values, calldatas, descriptionHash);
+
+          await time.increase(MIN_DELAY + 1);
+          await mine(1);
+
+          await governor.execute(targets, values, calldatas, descriptionHash);
+          // await stableSwapModule.udpateTotalValueDeposited();
+
           const totalValueDepositedAfterUpdate = await stableSwapModule.totalValueDeposited();
           expect(totalValueDepositedAfterUpdate).to.be.equal(totalValueDepositedBeforeUpdate);
 
@@ -256,9 +405,34 @@ describe("StableSwapModuleWrapper", () => {
         it("Should withdraw tokens but the one that withdraws tokens earlier must have slightly less fees rewards", async () => {
           const TOTAL_DEPOSIT_FOR_EACH_ACCOUNT = WeiPerWad.mul(1000);
           const TOTAL_DEPOSIT_FOR_EACH_ACCOUNT_USD = WeiPerSixDecimals.mul(1000);
+          let values = [0];
+          let targets = [stableSwapModuleWrapper.address];
+          let calldatas = [];
+
           for (let i = 1; i < 5; i++) {
             console.log(`depositing for account [${i}]`);
-            await stableSwapModuleWrapper.addToWhitelist(accounts[i].address);
+            calldatas = [stableSwapModuleWrapper.interface.encodeFunctionData("addToWhitelist", [accounts[i].address])];
+            let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+            let proposalReceipt = await proposalTx.wait();
+            let proposalId = proposalReceipt.events[0].args.proposalId;
+
+            // wait for the voting period to pass
+            await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+            await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+            await mine(VOTING_PERIOD + 1);
+
+            // Queue the TX
+            let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+            await governor.queue(targets, values, calldatas, descriptionHash);
+
+            await time.increase(MIN_DELAY + 1);
+            await mine(1);
+
+            await governor.execute(targets, values, calldatas, descriptionHash);
+            // await stableSwapModuleWrapper.addToWhitelist(accounts[i].address);
+
             await USDT.connect(provider.getSigner(accounts[i].address)).approve(stableSwapModuleWrapper.address, MaxUint256);
             await fathomStablecoin.connect(provider.getSigner(accounts[i].address)).approve(stableSwapModuleWrapper.address, MaxUint256);
             await USDT.mint(accounts[i].address, TOTAL_DEPOSIT_FOR_EACH_ACCOUNT_USD);
@@ -310,10 +484,35 @@ describe("StableSwapModuleWrapper", () => {
       it("Should be successful", async () => {
         const TOTAL_DEPOSIT_FOR_EACH_ACCOUNT = WeiPerWad.mul(1000);
         const TOTAL_DEPOSIT_FOR_EACH_ACCOUNT_USD = WeiPerSixDecimals.mul(1000);
+
+        let values = [0];
+        let targets = [stableSwapModuleWrapper.address];
+        let calldatas = [];
         //whitelist and deposit for 3 accounts
         for (let i = 1; i < 4; i++) {
           console.log(`depositing for account [${i}]`);
-          await stableSwapModuleWrapper.addToWhitelist(accounts[i].address);
+          calldatas = [stableSwapModuleWrapper.interface.encodeFunctionData("addToWhitelist", [accounts[i].address])];
+          let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+          let proposalReceipt = await proposalTx.wait();
+          let proposalId = proposalReceipt.events[0].args.proposalId;
+
+          // wait for the voting period to pass
+          await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+          await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+          await mine(VOTING_PERIOD + 1);
+
+          // Queue the TX
+          let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+          await governor.queue(targets, values, calldatas, descriptionHash);
+
+          await time.increase(MIN_DELAY + 1);
+          await mine(1);
+
+          await governor.execute(targets, values, calldatas, descriptionHash);
+          // await stableSwapModuleWrapper.addToWhitelist(accounts[i].address);
+
           await USDT.connect(provider.getSigner(accounts[i].address)).approve(stableSwapModuleWrapper.address, MaxUint256);
           await fathomStablecoin.connect(provider.getSigner(accounts[i].address)).approve(stableSwapModuleWrapper.address, MaxUint256);
           await USDT.mint(accounts[i].address, TOTAL_DEPOSIT_FOR_EACH_ACCOUNT_USD);
@@ -338,7 +537,30 @@ describe("StableSwapModuleWrapper", () => {
 
         await stableSwapModuleWrapper.connect(provider.getSigner(accounts[1].address)).withdrawTokens(TOTAL_DEPOSIT_FOR_EACH_ACCOUNT.mul(2));
 
-        await stableSwapModuleWrapper.addToWhitelist(accounts[4].address);
+        values = [0];
+        targets = [stableSwapModuleWrapper.address];
+        calldatas = [stableSwapModuleWrapper.interface.encodeFunctionData("addToWhitelist", [accounts[4].address])];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModuleWrapper.addToWhitelist(accounts[4].address);
+
         await USDT.connect(provider.getSigner(accounts[4].address)).approve(stableSwapModuleWrapper.address, MaxUint256);
         await fathomStablecoin.connect(provider.getSigner(accounts[4].address)).approve(stableSwapModuleWrapper.address, MaxUint256);
         await USDT.mint(accounts[4].address, TOTAL_DEPOSIT_FOR_EACH_ACCOUNT_USD);
@@ -567,7 +789,30 @@ describe("StableSwapModuleWrapper", () => {
 
     context("1. Whitelist one account, 2. swap tokens to generate fees, 3. withdraw tokens, 4. repeat steps 2 and 3", async () => {
       it("Should withdraw correct fees and check the console for verfication ", async () => {
-        await stableSwapModuleWrapper.addToWhitelist(accounts[2].address);
+        let values = [0];
+        let targets = [stableSwapModuleWrapper.address];
+        let calldatas = [stableSwapModuleWrapper.interface.encodeFunctionData("addToWhitelist", [accounts[2].address])];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModuleWrapper.addToWhitelist(accounts[2].address);
+
         await USDT.connect(provider.getSigner(accounts[2].address)).approve(stableSwapModuleWrapper.address, MaxUint256);
         await fathomStablecoin.connect(provider.getSigner(accounts[2].address)).approve(stableSwapModuleWrapper.address, MaxUint256);
         await USDT.mint(accounts[2].address, TO_DEPOSIT_USD);
@@ -639,7 +884,30 @@ describe("StableSwapModuleWrapper", () => {
   describe("#decentralizedState", async () => {
     context("set decentralized state and deposit tokens by anybody", async () => {
       it("Should succeed", async () => {
-        await stableSwapModuleWrapper.connect(provider.getSigner(DeployerAddress)).setIsDecentralizedState(true);
+        let values = [0];
+        let targets = [stableSwapModuleWrapper.address];
+        let calldatas = [stableSwapModuleWrapper.interface.encodeFunctionData("setIsDecentralizedState", [true])];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModuleWrapper.connect(provider.getSigner(DeployerAddress)).setIsDecentralizedState(true);
+
         await fathomStablecoin.connect(provider.getSigner(AliceAddress)).approve(stableSwapModuleWrapper.address, MaxUint256);
         await USDT.connect(provider.getSigner(AliceAddress)).approve(stableSwapModuleWrapper.address, MaxUint256);
         await stableSwapModuleWrapper.connect(provider.getSigner(AliceAddress)).depositTokens(TO_DEPOSIT);
@@ -648,12 +916,57 @@ describe("StableSwapModuleWrapper", () => {
 
     context("set decentralized state and deposit tokens should succeed then, set decentralized state as false and should fail", async () => {
       it("Should succeed", async () => {
-        await stableSwapModuleWrapper.connect(provider.getSigner(DeployerAddress)).setIsDecentralizedState(true);
+        let values = [0];
+        let targets = [stableSwapModuleWrapper.address];
+        let calldatas = [stableSwapModuleWrapper.interface.encodeFunctionData("setIsDecentralizedState", [true])];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModuleWrapper.connect(provider.getSigner(DeployerAddress)).setIsDecentralizedState(true);
+
         await fathomStablecoin.connect(provider.getSigner(accounts[1].address)).approve(stableSwapModuleWrapper.address, MaxUint256);
         await USDT.connect(provider.getSigner(accounts[1].address)).approve(stableSwapModuleWrapper.address, MaxUint256);
 
         await stableSwapModuleWrapper.connect(provider.getSigner(accounts[1].address)).depositTokens(TO_DEPOSIT);
-        await stableSwapModuleWrapper.connect(provider.getSigner(DeployerAddress)).setIsDecentralizedState(false);
+
+        calldatas = [stableSwapModuleWrapper.interface.encodeFunctionData("setIsDecentralizedState", [false])];
+        proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await stableSwapModuleWrapper.connect(provider.getSigner(DeployerAddress)).setIsDecentralizedState(false);
+
         await expect(stableSwapModuleWrapper.connect(provider.getSigner(accounts[1].address)).depositTokens(TO_DEPOSIT)).to.be.revertedWith(
           "user-not-whitelisted"
         );
@@ -715,9 +1028,35 @@ describe("StableSwapModuleWrapper", () => {
         it("Should withdraw tokens with emergencyWithdraw", async () => {
           const TOTAL_DEPOSIT_FOR_EACH_ACCOUNT = WeiPerWad.mul(1000);
           const TOTAL_DEPOSIT_FOR_EACH_ACCOUNT_USD = WeiPerSixDecimals.mul(1000);
+
+          let values = [0];
+          let targets = [stableSwapModuleWrapper.address];
+          let calldatas = [];
+
           for (let i = 1; i < 5; i++) {
             console.log(`depositing for account [${i}]`);
-            await stableSwapModuleWrapper.addToWhitelist(accounts[i].address);
+            calldatas = [stableSwapModuleWrapper.interface.encodeFunctionData("addToWhitelist", [accounts[i].address])];
+            let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+            let proposalReceipt = await proposalTx.wait();
+            let proposalId = proposalReceipt.events[0].args.proposalId;
+
+            // wait for the voting period to pass
+            await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+            await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+            await mine(VOTING_PERIOD + 1);
+
+            // Queue the TX
+            let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+            await governor.queue(targets, values, calldatas, descriptionHash);
+
+            await time.increase(MIN_DELAY + 1);
+            await mine(1);
+
+            await governor.execute(targets, values, calldatas, descriptionHash);
+            // await stableSwapModuleWrapper.addToWhitelist(accounts[i].address);
+
             await USDT.connect(provider.getSigner(accounts[i].address)).approve(stableSwapModuleWrapper.address, MaxUint256);
             await fathomStablecoin.connect(provider.getSigner(accounts[i].address)).approve(stableSwapModuleWrapper.address, MaxUint256);
             await USDT.mint(accounts[i].address, TOTAL_DEPOSIT_FOR_EACH_ACCOUNT_USD);
@@ -746,8 +1085,30 @@ describe("StableSwapModuleWrapper", () => {
             await stableSwapModuleWrapper.connect(provider.getSigner(accounts[i].address)).withdrawClaimedFees();
           }
 
-          await stableSwapModuleWrapper.pause();
-          await stableSwapModule.pause();
+          values = [0, 0];
+          targets = [stableSwapModuleWrapper.address, stableSwapModule.address];
+          calldatas = [stableSwapModuleWrapper.interface.encodeFunctionData("pause"), stableSwapModule.interface.encodeFunctionData("pause")];
+          let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+          let proposalReceipt = await proposalTx.wait();
+          let proposalId = proposalReceipt.events[0].args.proposalId;
+
+          // wait for the voting period to pass
+          await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+          await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+          await mine(VOTING_PERIOD + 1);
+
+          // Queue the TX
+          let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+          await governor.queue(targets, values, calldatas, descriptionHash);
+
+          await time.increase(MIN_DELAY + 1);
+          await mine(1);
+
+          await governor.execute(targets, values, calldatas, descriptionHash);
+          // await stableSwapModuleWrapper.pause();
+          // await stableSwapModule.pause();
 
           for (let i = 0; i < 5; i++) {
             console.log(`emergency withdraw for account [${i}]`);

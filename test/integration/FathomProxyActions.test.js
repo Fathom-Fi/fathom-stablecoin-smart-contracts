@@ -1,6 +1,7 @@
 const { ethers } = require("hardhat");
 const provider = ethers.provider;
 const { expect } = require("chai");
+const { time, mine } = require("@nomicfoundation/hardhat-network-helpers");
 
 const { WeiPerRay, WeiPerWad } = require("../helper/unit");
 const AssertHelpers = require("../helper/assert");
@@ -8,6 +9,11 @@ const { createProxyWallets } = require("../helper/proxy-wallets");
 const PositionHelper = require("../helper/positions");
 const { getProxy } = require("../../common/proxies");
 const pools = require("../../common/collateral");
+
+const MIN_DELAY = 3600; // 1 hour
+const VOTING_PERIOD = 50400; // This is how long voting lasts, 1 week
+const VOTING_DELAY = 1; // How many blocks till a proposal vote becomes active
+const VOTE_WAY = 1;
 
 describe("Position Closure without collateral withdrawal", () => {
   // Proxy wallet
@@ -18,19 +24,22 @@ describe("Position Closure without collateral withdrawal", () => {
   let bookKeeper;
   let simplePriceFeed;
   let fathomStablecoin;
+  let governor;
 
   let reentrancyAttacker;
   let reentrancyAttacker2;
   let reEntrantProxyWallet;
   let reEntrantProxyWallet2;
 
+  let DeployerAddress;
   let AliceAddress;
   let DevAddress;
 
   beforeEach(async () => {
     await deployments.fixture(["DeployTestFixture"]);
 
-    const { allice, dev } = await getNamedAccounts();
+    const { deployer, allice, dev } = await getNamedAccounts();
+    DeployerAddress = deployer;
     AliceAddress = allice;
     DevAddress = dev;
 
@@ -39,16 +48,46 @@ describe("Position Closure without collateral withdrawal", () => {
     const SimplePriceFeed = await deployments.get("SimplePriceFeed");
     simplePriceFeed = await ethers.getContractAt("SimplePriceFeed", SimplePriceFeed.address);
 
+    const Governor = await deployments.get("ProtocolGovernor");
+    governor = await ethers.getContractAt("ProtocolGovernor", Governor.address);
+
     bookKeeper = await getProxy(proxyFactory, "BookKeeper");
     const stabilityFeeCollector = await getProxy(proxyFactory, "StabilityFeeCollector");
     positionManager = await getProxy(proxyFactory, "PositionManager");
     fathomStablecoin = await getProxy(proxyFactory, "FathomStablecoin");
     const proxyWalletRegistry = await getProxy(proxyFactory, "ProxyWalletRegistry");
-    proxyWalletRegistry.setDecentralizedMode(true);
 
-    ({
-      proxyWallets: [aliceProxyWallet],
-    } = await createProxyWallets([AliceAddress]));
+    let values = [0];
+    let targets = [proxyWalletRegistry.address];
+    let calldatas = [proxyWalletRegistry.interface.encodeFunctionData("setDecentralizedMode", [true])];
+    let proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+    let proposalReceipt = await proposalTx.wait();
+    let proposalId = proposalReceipt.events[0].args.proposalId;
+
+    // wait for the voting period to pass
+    await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+    await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+    await mine(VOTING_PERIOD + 1);
+
+    // Queue the TX
+    let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+    await governor.queue(targets, values, calldatas, descriptionHash);
+
+    await time.increase(MIN_DELAY + 1);
+    await mine(1);
+
+    await governor.execute(targets, values, calldatas, descriptionHash);
+    // await proxyWalletRegistry.setDecentralizedMode(true);
+
+    // ({
+    //   proxyWallets: [aliceProxyWallet],
+    // } = await createProxyWallets([AliceAddress]));
+
+    await proxyWalletRegistry.build(AliceAddress);
+    const proxyWalletAddress = await proxyWalletRegistry.proxies(AliceAddress);
+    aliceProxyWallet = await ethers.getContractAt("ProxyWallet", proxyWalletAddress);
 
     const ReentrancyAttacker = await deployments.get("ReentrancyAttacker");
     reentrancyAttacker = await ethers.getContractAt("ReentrancyAttacker", ReentrancyAttacker.address);
@@ -65,14 +104,39 @@ describe("Position Closure without collateral withdrawal", () => {
     await reentrancyAttacker.setProxyWallet(reEntrantProxyWallet);
     await reentrancyAttacker2.setProxyWallet(reEntrantProxyWallet2);
 
-    await stabilityFeeCollector.setSystemDebtEngine(DevAddress);
+    values = [0, 0];
+    targets = [stabilityFeeCollector.address, simplePriceFeed.address];
+    calldatas = [
+      stabilityFeeCollector.interface.encodeFunctionData("setSystemDebtEngine", [DevAddress]),
+      simplePriceFeed.interface.encodeFunctionData("setPrice", [WeiPerRay]),
+    ];
+    proposalTx = await governor.propose(targets, values, calldatas, "Setup");
+    proposalReceipt = await proposalTx.wait();
+    proposalId = proposalReceipt.events[0].args.proposalId;
+
+    // wait for the voting period to pass
+    await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+    await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+    await mine(VOTING_PERIOD + 1);
+
+    // Queue the TX
+    descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Setup"));
+    await governor.queue(targets, values, calldatas, descriptionHash);
+
+    await time.increase(MIN_DELAY + 1);
+    await mine(1);
+
+    await governor.execute(targets, values, calldatas, descriptionHash);
+    // await stabilityFeeCollector.setSystemDebtEngine(DevAddress);
     await fathomStablecoin.connect(provider.getSigner(AliceAddress)).approve(aliceProxyWallet.address, WeiPerWad.mul(10000));
   });
 
   describe("#wipeAndUnlockXDC", () => {
     context("open position and pay back debt without collateral withdrawal", () => {
       it("should be success", async () => {
-        await simplePriceFeed.setPrice(WeiPerRay);
+        // await simplePriceFeed.setPrice(WeiPerRay);
 
         // position 1
         //  a. open a new position
@@ -98,7 +162,7 @@ describe("Position Closure without collateral withdrawal", () => {
     });
     context("try reentry with ReentrancyAttacker", () => {
       it("should not make change to the position", async () => {
-        await simplePriceFeed.setPrice(WeiPerRay);
+        // await simplePriceFeed.setPrice(WeiPerRay);
 
         // position 1
         //  a. open a new position
@@ -128,7 +192,7 @@ describe("Position Closure without collateral withdrawal", () => {
     });
     context("try reentry with ReentrancyAttacker2", () => {
       it("should fail", async () => {
-        await simplePriceFeed.setPrice(WeiPerRay);
+        // await simplePriceFeed.setPrice(WeiPerRay);
 
         // position 1
         //  a. open a new position
@@ -158,7 +222,7 @@ describe("Position Closure without collateral withdrawal", () => {
   describe("#wipeAllAndUnlockXDC", () => {
     context("open position and pay back debt without collateral withdrawal", () => {
       it("should be success", async () => {
-        await simplePriceFeed.setPrice(WeiPerRay);
+        // await simplePriceFeed.setPrice(WeiPerRay);
 
         // position 1
         //  a. open a new position

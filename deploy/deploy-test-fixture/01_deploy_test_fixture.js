@@ -26,6 +26,10 @@ const { initialize: initializeAddCollateral } = require("../../scripts/setup/add
 const { addRoles: addRolesAddCollateral } = require("../../scripts/setup/add-collateral/addRoles");
 const { deployVault: deployVaultAddCollateral } = require("../../scripts/setup/add-collateral/deployVault");
 
+// Deploy DAO
+const { deployDao } = require("../../scripts/setup/deploy/deployDao");
+const { transferOwnership } = require("../../scripts/setup/transfer-ownership/transferOwnership");
+
 module.exports = async ({ getNamedAccounts, deployments, getChainId }) => {
   // Setup
   await deployMocks(getNamedAccounts, deployments, getChainId);
@@ -63,6 +67,10 @@ module.exports = async ({ getNamedAccounts, deployments, getChainId }) => {
 
   // Configuration
   await addCollateralConfigPool(deployments, getChainId);
+
+  // Transfer ownership of the contracts to the dao
+  await deployDao(getNamedAccounts, deployments);
+  await transferOwnership(getNamedAccounts, deployments, true);
 };
 
 module.exports.tags = ["DeployTestFixture"];

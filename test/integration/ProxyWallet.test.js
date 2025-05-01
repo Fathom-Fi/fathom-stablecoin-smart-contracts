@@ -1,13 +1,21 @@
 const { ethers } = require("hardhat");
 const provider = ethers.provider;
 const { expect } = require("chai");
+const { time, mine } = require("@nomicfoundation/hardhat-network-helpers");
 
 const { getProxy } = require("../../common/proxies");
+
+const MIN_DELAY = 3600; // 1 hour
+const VOTING_PERIOD = 50400; // This is how long voting lasts, 1 week
+const VOTING_DELAY = 1; // How many blocks till a proposal vote becomes active
+const VOTE_WAY = 1;
 
 describe("ProxyWallet", () => {
   // Contract
   let proxyWalletRegistry;
+  let governor;
 
+  let DeployerAddress;
   let AliceAddress;
   let BobAddress;
   let AddressZero;
@@ -15,7 +23,8 @@ describe("ProxyWallet", () => {
   beforeEach(async () => {
     await deployments.fixture(["DeployTestFixture"]);
 
-    const { allice, bob, a0 } = await getNamedAccounts();
+    const { deployer, allice, bob, a0 } = await getNamedAccounts();
+    DeployerAddress = deployer;
     AliceAddress = allice;
     BobAddress = bob;
     AddressZero = a0;
@@ -23,8 +32,34 @@ describe("ProxyWallet", () => {
     const ProxyFactory = await deployments.get("FathomProxyFactory");
     const proxyFactory = await ethers.getContractAt("FathomProxyFactory", ProxyFactory.address);
 
+    const Governor = await deployments.get("ProtocolGovernor");
+    governor = await ethers.getContractAt("ProtocolGovernor", Governor.address);
+
     proxyWalletRegistry = await getProxy(proxyFactory, "ProxyWalletRegistry");
-    await proxyWalletRegistry.setDecentralizedMode(true);
+    const values = [0];
+    const targets = [proxyWalletRegistry.address];
+    const calldatas = [proxyWalletRegistry.interface.encodeFunctionData("setDecentralizedMode", [true])];
+    const proposalTx = await governor.propose(targets, values, calldatas, "Set Decentralized Mode");
+    const proposalReceipt = await proposalTx.wait();
+    const proposalId = proposalReceipt.events[0].args.proposalId;
+
+    // wait for the voting period to pass
+    await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+    await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+    await mine(VOTING_PERIOD + 1);
+
+    // Queue the TX
+    const descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set Decentralized Mode"));
+    await governor.queue(targets, values, calldatas, descriptionHash);
+
+    await time.increase(MIN_DELAY + 1);
+    await mine(1);
+
+    // Execute
+    await governor.execute(targets, values, calldatas, descriptionHash);
+    // await proxyWalletRegistry.setDecentralizedMode(true);
   });
   describe("#new user create a new proxy wallet", async () => {
     context("alice create a new proxy wallet", async () => {

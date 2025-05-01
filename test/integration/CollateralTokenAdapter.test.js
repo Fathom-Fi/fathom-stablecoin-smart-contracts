@@ -1,7 +1,13 @@
 const { ethers, getNamedAccounts } = require("hardhat");
 const provider = ethers.provider;
+const { time, mine } = require("@nomicfoundation/hardhat-network-helpers");
 const { expect } = require("chai");
 const { getProxy } = require("../../common/proxies");
+
+const MIN_DELAY = 3600; // 1 hour
+const VOTING_PERIOD = 50400; // This is how long voting lasts, 1 week
+const VOTING_DELAY = 1; // How many blocks till a proposal vote becomes active
+const VOTE_WAY = 1;
 
 describe("CollateralTokenAdapter", () => {
   // Contracts
@@ -11,6 +17,7 @@ describe("CollateralTokenAdapter", () => {
   let DeployerAddress;
   let AliceAddress;
   let BobAddress;
+  let governor;
 
   beforeEach(async () => {
     await deployments.fixture(["DeployTestFixture"]);
@@ -21,6 +28,8 @@ describe("CollateralTokenAdapter", () => {
 
     const ProxyFactory = await deployments.get("FathomProxyFactory");
     const proxyFactory = await ethers.getContractAt("FathomProxyFactory", ProxyFactory.address);
+    const Governor = await deployments.get("ProtocolGovernor");
+    governor = await ethers.getContractAt("ProtocolGovernor", Governor.address);
     collateralTokenAdapter = await getProxy(proxyFactory, "CollateralTokenAdapter");
     bookKeeper = await getProxy(proxyFactory, "BookKeeper");
     const _WXDC = await deployments.get("WXDC");
@@ -31,8 +40,31 @@ describe("CollateralTokenAdapter", () => {
       it("should return the correct net asset valuation", async () => {
         //Alice wraps XDC to WXDC
         await WXDC.connect(provider.getSigner(AliceAddress)).deposit({ value: ethers.constants.WeiPerEther.mul(2) });
+
+        const encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("addToWhitelist", [AliceAddress]);
+
+        const proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Add to whitelist");
+        const proposalReceipt = await proposalTx.wait();
+        const proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        const descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Add to whitelist"));
+        await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
         //Alice is whiteListed to directly call deposit function on CollateralTokenAdapter
-        await collateralTokenAdapter.addToWhitelist(AliceAddress);
+        await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
         await WXDC.connect(provider.getSigner(AliceAddress)).approve(collateralTokenAdapter.address, ethers.utils.parseEther("1"));
         await collateralTokenAdapter
           .connect(provider.getSigner(AliceAddress))
@@ -51,8 +83,29 @@ describe("CollateralTokenAdapter", () => {
       it("should only recognized collateral tokens from deposit function", async () => {
         //Alice wraps XDC to WXDC
         await WXDC.connect(provider.getSigner(AliceAddress)).deposit({ value: ethers.constants.WeiPerEther.mul(2) });
+        const encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("addToWhitelist", [AliceAddress]);
+
+        const proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Add to whitelist");
+        const proposalReceipt = await proposalTx.wait();
+        const proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        const descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Add to whitelist"));
+        await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
         //Alice is whiteListed to directly call deposit function on CollateralTokenAdapter
-        await collateralTokenAdapter.addToWhitelist(AliceAddress);
+        await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
         await WXDC.connect(provider.getSigner(AliceAddress)).approve(collateralTokenAdapter.address, ethers.utils.parseEther("1"));
         await collateralTokenAdapter
           .connect(provider.getSigner(AliceAddress))
@@ -77,9 +130,53 @@ describe("CollateralTokenAdapter", () => {
   describe("#deposit", async () => {
     context("when CollateralTokenAdapter is not live", async () => {
       it("should revert", async () => {
-        // Cage collateralTokenAdapter
-        await collateralTokenAdapter.cage();
-        await collateralTokenAdapter.addToWhitelist(DeployerAddress);
+        /** =========== Cage collateralTokenAdapter =========== */
+        let encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("cage");
+
+        let proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Cage");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Cage"));
+        await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+        /** =========== Add to whitelist =========== */
+        encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("addToWhitelist", [DeployerAddress]);
+
+        proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Add to whitelist");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Add to whitelist"));
+        await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
         await expect(
           collateralTokenAdapter.deposit(
             DeployerAddress,
@@ -96,8 +193,31 @@ describe("CollateralTokenAdapter", () => {
         await WXDC.connect(provider.getSigner(AliceAddress)).deposit({ value: ethers.constants.WeiPerEther.mul(2) });
         // Assuming Alice is the first one to deposit hence no rewards to be harvested yet
         await WXDC.connect(provider.getSigner(AliceAddress)).approve(collateralTokenAdapter.address, ethers.utils.parseEther("2"));
+
+        let encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("addToWhitelist", [AliceAddress]);
+
+        let proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Add to whitelist");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Add to whitelist"));
+        await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
         //Alice is whiteListed to directly call deposit function on CollateralTokenAdapter
-        await collateralTokenAdapter.addToWhitelist(AliceAddress);
+        await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
         await collateralTokenAdapter
           .connect(provider.getSigner(AliceAddress))
           .deposit(AliceAddress, ethers.utils.parseEther("1"), ethers.utils.defaultAbiCoder.encode(["address"], [AliceAddress]));
@@ -117,8 +237,31 @@ describe("CollateralTokenAdapter", () => {
         //Bob wraps XDC to WXDC
         await WXDC.connect(provider.getSigner(BobAddress)).deposit({ value: ethers.constants.WeiPerEther.mul(4) });
         await WXDC.connect(provider.getSigner(BobAddress)).approve(collateralTokenAdapter.address, ethers.utils.parseEther("4"));
-        //Alice is whiteListed to directly call deposit function on CollateralTokenAdapter
-        await collateralTokenAdapter.addToWhitelist(BobAddress);
+
+        encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("addToWhitelist", [BobAddress]);
+
+        proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Add to whitelist");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Add to whitelist"));
+        await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        // Bob is whiteListed to directly call deposit function on CollateralTokenAdapter
+        await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
         await collateralTokenAdapter
           .connect(provider.getSigner(BobAddress))
           .deposit(BobAddress, ethers.utils.parseEther("4"), ethers.utils.defaultAbiCoder.encode(["address"], [BobAddress]));
@@ -142,7 +285,29 @@ describe("CollateralTokenAdapter", () => {
   describe("#withdraw", async () => {
     context("when withdraw more than what CollateralTokenAdapter staked", async () => {
       it("should revert", async () => {
-        await collateralTokenAdapter.addToWhitelist(AliceAddress);
+        let encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("addToWhitelist", [AliceAddress]);
+
+        let proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Add to whitelist");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Add to whitelist"));
+        await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        //Alice is whiteListed to directly call deposit function on CollateralTokenAdapter
+        await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
         //Alice wraps XDC to WXDC
         await WXDC.connect(provider.getSigner(AliceAddress)).deposit({ value: ethers.constants.WeiPerEther.mul(2) });
         await WXDC.connect(provider.getSigner(AliceAddress)).approve(collateralTokenAdapter.address, ethers.utils.parseEther("1"));
@@ -160,13 +325,60 @@ describe("CollateralTokenAdapter", () => {
 
     context("when withdraw more than what he staked", async () => {
       it("should revert", async () => {
-        await collateralTokenAdapter.addToWhitelist(AliceAddress);
+        let encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("addToWhitelist", [AliceAddress]);
+
+        let proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Add to whitelist");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Add to whitelist"));
+        await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        //Alice is whiteListed to directly call deposit function on CollateralTokenAdapter
+        await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
         await WXDC.connect(provider.getSigner(AliceAddress)).deposit({ value: ethers.constants.WeiPerEther.mul(2) });
         await WXDC.connect(provider.getSigner(AliceAddress)).approve(collateralTokenAdapter.address, ethers.utils.parseEther("1"));
         await collateralTokenAdapter
           .connect(provider.getSigner(AliceAddress))
           .deposit(AliceAddress, ethers.utils.parseEther("1"), ethers.utils.defaultAbiCoder.encode(["address"], [AliceAddress]));
-        await collateralTokenAdapter.addToWhitelist(BobAddress);
+
+        encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("addToWhitelist", [BobAddress]);
+
+        proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Add to whitelist");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Add to whitelist"));
+        await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        // Bob is whiteListed to directly call deposit function on CollateralTokenAdapter
+        await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
         await WXDC.connect(provider.getSigner(BobAddress)).deposit({ value: ethers.constants.WeiPerEther.mul(4) });
         await WXDC.connect(provider.getSigner(BobAddress)).approve(collateralTokenAdapter.address, ethers.utils.parseEther("4"));
         await collateralTokenAdapter
@@ -183,7 +395,30 @@ describe("CollateralTokenAdapter", () => {
 
     context("when CollateralTokenAdapter is not live", async () => {
       it("should still allow user to withdraw", async () => {
-        await collateralTokenAdapter.addToWhitelist(AliceAddress);
+        let encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("addToWhitelist", [AliceAddress]);
+
+        let proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Add to whitelist");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Add to whitelist"));
+        await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        //Alice is whiteListed to directly call deposit function on CollateralTokenAdapter
+        await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
         // Assuming Alice is the first one to deposit hence no rewards to be harvested yet
         await WXDC.connect(provider.getSigner(AliceAddress)).deposit({ value: ethers.constants.WeiPerEther.mul(2) });
         await WXDC.connect(provider.getSigner(AliceAddress)).approve(collateralTokenAdapter.address, ethers.utils.parseEther("1"));
@@ -195,8 +430,30 @@ describe("CollateralTokenAdapter", () => {
         let collateralPoolIdFromAdapter = await collateralTokenAdapter.collateralPoolId();
         expect(await bookKeeper.collateralToken(collateralPoolIdFromAdapter, AliceAddress)).to.be.eq(ethers.utils.parseEther("1"));
 
+        encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("cage");
+
+        proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Cage");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Cage"));
+        await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
         // Cage CollateralTokenAdapter
-        await collateralTokenAdapter.cage();
+        await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
         expect(await collateralTokenAdapter.live()).to.be.eq(0);
 
         // Now Alice withdraw her position. 4 blocks have been passed.
@@ -217,7 +474,30 @@ describe("CollateralTokenAdapter", () => {
       });
 
       it("should still allow user to withdraw with pending rewards (if any)", async () => {
-        await collateralTokenAdapter.addToWhitelist(AliceAddress);
+        let encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("addToWhitelist", [AliceAddress]);
+
+        let proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Add to whitelist");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Add to whitelist"));
+        await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        //Alice is whiteListed to directly call deposit function on CollateralTokenAdapter
+        await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
         await WXDC.connect(provider.getSigner(AliceAddress)).deposit({ value: ethers.constants.WeiPerEther.mul(2) });
 
         // Assuming Alice is the first one to deposit hence no rewards to be harvested yet
@@ -231,7 +511,30 @@ describe("CollateralTokenAdapter", () => {
         expect(await bookKeeper.collateralToken(collateralPoolIdFromAdapter, AliceAddress)).to.be.eq(ethers.utils.parseEther("1"));
 
         await WXDC.connect(provider.getSigner(BobAddress)).deposit({ value: ethers.constants.WeiPerEther.mul(4) });
-        await collateralTokenAdapter.addToWhitelist(BobAddress);
+
+        encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("addToWhitelist", [BobAddress]);
+
+        proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Add to whitelist");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Add to whitelist"));
+        await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        // Bob is whiteListed to directly call deposit function on CollateralTokenAdapter
+        await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
 
         // Bob join the party with 4 WXDC! 2 Blocks have been passed.
         await WXDC.connect(provider.getSigner(BobAddress)).approve(collateralTokenAdapter.address, ethers.utils.parseEther("4"));
@@ -246,8 +549,29 @@ describe("CollateralTokenAdapter", () => {
         // advanceBlock
         await hre.network.provider.send("hardhat_mine", ["0x01"]);
 
+        encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("cage");
+
+        proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Cage");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Cage"));
+        await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
         // Cage CollateralTokenAdapter
-        await collateralTokenAdapter.cage();
+        await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
         expect(await collateralTokenAdapter.live()).to.be.eq(0);
 
         // Now Alice withdraw her position. Only 200 FXD has been harvested from FairLaunch.
@@ -287,7 +611,29 @@ describe("CollateralTokenAdapter", () => {
 
     context("when all parameters are valid", async () => {
       it("should work", async () => {
-        await collateralTokenAdapter.addToWhitelist(AliceAddress);
+        let encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("addToWhitelist", [AliceAddress]);
+
+        let proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Add to whitelist");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Add to whitelist"));
+        await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        //Alice is whiteListed to directly call deposit function on CollateralTokenAdapter
+        await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
         //Alice wraps XDC to WXDC
         await WXDC.connect(provider.getSigner(AliceAddress)).deposit({ value: ethers.constants.WeiPerEther.mul(2) });
         // Assuming Alice is the first one to deposit hence no rewards to be harvested yet
@@ -315,14 +661,59 @@ describe("CollateralTokenAdapter", () => {
     context("when bob withdraw collateral to alice", async () => {
       context("when bob doesn't has collateral", () => {
         it("should be revert", async () => {
-          await collateralTokenAdapter.addToWhitelist(AliceAddress);
+          let encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("addToWhitelist", [AliceAddress]);
+
+          let proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Add to whitelist");
+          let proposalReceipt = await proposalTx.wait();
+          let proposalId = proposalReceipt.events[0].args.proposalId;
+
+          // wait for the voting period to pass
+          await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+          await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+          await mine(VOTING_PERIOD + 1);
+
+          // Queue the TX
+          let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Add to whitelist"));
+          await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+          await time.increase(MIN_DELAY + 1);
+          await mine(1);
+
+          // Execute
+          //Alice is whiteListed to directly call deposit function on CollateralTokenAdapter
+          await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
           await WXDC.connect(provider.getSigner(AliceAddress)).deposit({ value: ethers.constants.WeiPerEther.mul(2) });
           // Assuming Alice is the first one to deposit hence no rewards to be harvested yet
           await WXDC.connect(provider.getSigner(AliceAddress)).approve(collateralTokenAdapter.address, ethers.utils.parseEther("1"));
           await collateralTokenAdapter
             .connect(provider.getSigner(AliceAddress))
             .deposit(AliceAddress, ethers.utils.parseEther("1"), ethers.utils.defaultAbiCoder.encode(["address"], [AliceAddress]));
-          await collateralTokenAdapter.addToWhitelist(BobAddress);
+
+          encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("addToWhitelist", [BobAddress]);
+
+          proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Add to whitelist");
+          proposalReceipt = await proposalTx.wait();
+          proposalId = proposalReceipt.events[0].args.proposalId;
+
+          // wait for the voting period to pass
+          await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+          await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+          await mine(VOTING_PERIOD + 1);
+
+          // Queue the TX
+          descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Add to whitelist"));
+          await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+          await time.increase(MIN_DELAY + 1);
+          await mine(1);
+
+          // Execute
+          // Bob is whiteListed to directly call deposit function on CollateralTokenAdapter
+          await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
           //checking with Subik-ji
           let collateralPoolIdFromAdapter = await collateralTokenAdapter.collateralPoolId();
 
@@ -337,7 +728,29 @@ describe("CollateralTokenAdapter", () => {
       });
       context("when bob has collateral", async () => {
         it("should be able to call withdraw", async () => {
-          await collateralTokenAdapter.addToWhitelist(AliceAddress);
+          let encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("addToWhitelist", [AliceAddress]);
+
+          let proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Add to whitelist");
+          let proposalReceipt = await proposalTx.wait();
+          let proposalId = proposalReceipt.events[0].args.proposalId;
+
+          // wait for the voting period to pass
+          await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+          await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+          await mine(VOTING_PERIOD + 1);
+
+          // Queue the TX
+          let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Add to whitelist"));
+          await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+          await time.increase(MIN_DELAY + 1);
+          await mine(1);
+
+          // Execute
+          //Alice is whiteListed to directly call deposit function on CollateralTokenAdapter
+          await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
           await WXDC.connect(provider.getSigner(AliceAddress)).deposit({ value: ethers.constants.WeiPerEther.mul(2) });
           await WXDC.connect(provider.getSigner(AliceAddress)).approve(collateralTokenAdapter.address, ethers.utils.parseEther("1"));
           await collateralTokenAdapter
@@ -348,7 +761,29 @@ describe("CollateralTokenAdapter", () => {
           let collateralPoolIdFromAdapter = await collateralTokenAdapter.collateralPoolId();
           expect(await bookKeeper.collateralToken(collateralPoolIdFromAdapter, AliceAddress)).to.be.eq(ethers.utils.parseEther("1"));
 
-          await collateralTokenAdapter.addToWhitelist(BobAddress);
+          encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("addToWhitelist", [BobAddress]);
+
+          proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Add to whitelist");
+          proposalReceipt = await proposalTx.wait();
+          proposalId = proposalReceipt.events[0].args.proposalId;
+
+          // wait for the voting period to pass
+          await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+          await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+          await mine(VOTING_PERIOD + 1);
+
+          // Queue the TX
+          descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Add to whitelist"));
+          await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+          await time.increase(MIN_DELAY + 1);
+          await mine(1);
+
+          // Execute
+          // Bob is whiteListed to directly call deposit function on CollateralTokenAdapter
+          await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
           await WXDC.connect(provider.getSigner(BobAddress)).deposit({ value: ethers.constants.WeiPerEther.mul(2) });
           await WXDC.connect(provider.getSigner(BobAddress)).approve(collateralTokenAdapter.address, ethers.utils.parseEther("1"));
           await collateralTokenAdapter
@@ -374,7 +809,29 @@ describe("CollateralTokenAdapter", () => {
     context("when CollateralTokenAdapter is not live", async () => {
       it("should allow users to exit with emergencyWithdraw and normal withdraw", async () => {
         await WXDC.connect(provider.getSigner(AliceAddress)).deposit({ value: ethers.constants.WeiPerEther.mul(2) });
-        await collateralTokenAdapter.addToWhitelist(AliceAddress);
+        let encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("addToWhitelist", [AliceAddress]);
+
+        let proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Add to whitelist");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Add to whitelist"));
+        await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        //Alice is whiteListed to directly call deposit function on CollateralTokenAdapter
+        await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
         // Assuming Alice is the first one to deposit hence no rewards to be harvested yet
         await WXDC.connect(provider.getSigner(AliceAddress)).approve(collateralTokenAdapter.address, ethers.utils.parseEther("1"));
         await collateralTokenAdapter
@@ -386,7 +843,31 @@ describe("CollateralTokenAdapter", () => {
         expect(await bookKeeper.collateralToken(collateralPoolIdFromAdapter, AliceAddress)).to.be.eq(ethers.utils.parseEther("1"));
 
         await WXDC.connect(provider.getSigner(BobAddress)).deposit({ value: ethers.constants.WeiPerEther.mul(4) });
-        await collateralTokenAdapter.addToWhitelist(BobAddress);
+
+        encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("addToWhitelist", [BobAddress]);
+
+        proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Add to whitelist");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Add to whitelist"));
+        await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        // Bob is whiteListed to directly call deposit function on CollateralTokenAdapter
+        await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
         // Bob join the party with 4 WXDC! 2 Blocks have been passed.
         await WXDC.connect(provider.getSigner(BobAddress)).approve(collateralTokenAdapter.address, ethers.utils.parseEther("4"));
         await collateralTokenAdapter
@@ -402,8 +883,29 @@ describe("CollateralTokenAdapter", () => {
         // won't be added as CollateralTokenAdapter cage before it get harvested.
         await hre.network.provider.send("hardhat_mine", ["0x01"]);
 
+        encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("cage");
+
+        proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Cage");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Cage"));
+        await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
         // Cage CollateralTokenAdapter
-        await collateralTokenAdapter.cage();
+        await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
         expect(await collateralTokenAdapter.live()).to.be.eq(0);
 
         // Alice panic and decided to emergencyWithdraw.
@@ -439,7 +941,29 @@ describe("CollateralTokenAdapter", () => {
     context("when all states are normal", async () => {
       it("can call emergencyWithdraw but the state will stay the same", async () => {
         await WXDC.connect(provider.getSigner(AliceAddress)).deposit({ value: ethers.constants.WeiPerEther.mul(1) });
-        await collateralTokenAdapter.addToWhitelist(AliceAddress);
+        let encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("addToWhitelist", [AliceAddress]);
+
+        let proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Add to whitelist");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Add to whitelist"));
+        await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        //Alice is whiteListed to directly call deposit function on CollateralTokenAdapter
+        await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
         await WXDC.connect(provider.getSigner(AliceAddress)).approve(collateralTokenAdapter.address, ethers.utils.parseEther("1"));
         await collateralTokenAdapter
           .connect(provider.getSigner(AliceAddress))
@@ -467,7 +991,29 @@ describe("CollateralTokenAdapter", () => {
   describe("#cage/#uncage", async () => {
     context("when whitelist cage", async () => {
       it("should put CollateralTokenAdapter live = 0", async () => {
-        await collateralTokenAdapter.cage();
+        let encodedFunctionCall = collateralTokenAdapter.interface.encodeFunctionData("cage");
+
+        let proposalTx = await governor.propose([collateralTokenAdapter.address], [0], [encodedFunctionCall], "Cage");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Cage"));
+        await governor.queue([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        // Cage
+        await governor.execute([collateralTokenAdapter.address], [0], [encodedFunctionCall], descriptionHash);
         expect(await collateralTokenAdapter.live()).to.be.eq(0);
       });
     });

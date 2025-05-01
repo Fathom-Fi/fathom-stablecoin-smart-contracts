@@ -1,7 +1,7 @@
 const { ethers } = require("hardhat");
 const provider = ethers.provider;
 const { expect } = require("chai");
-const { time } = require("@nomicfoundation/hardhat-network-helpers");
+const { time, mine } = require("@nomicfoundation/hardhat-network-helpers");
 
 const { BigNumber } = ethers;
 const { parseEther, parseUnits, defaultAbiCoder, formatBytes32String } = ethers.utils;
@@ -19,6 +19,11 @@ const TREASURY_FEE_BPS = BigNumber.from(5000);
 const COLLATERAL_POOL_ID = formatBytes32String("XDC");
 const BPS = BigNumber.from(10000);
 
+const MIN_DELAY = 3600; // 1 hour
+const VOTING_PERIOD = 50400; // This is how long voting lasts, 1 week
+const VOTING_DELAY = 1; // How many blocks till a proposal vote becomes active
+const VOTE_WAY = 1;
+
 describe("LiquidationEngine", () => {
   // Contracts
   let aliceProxyWallet;
@@ -34,19 +39,25 @@ describe("LiquidationEngine", () => {
   let systemDebtEngine;
   let collateralPoolConfig;
   let priceOracle;
+  let governor;
 
+  let DeployerAddress;
   let AliceAddress;
   let BobAddress;
 
   beforeEach(async () => {
     await deployments.fixture(["DeployTestFixture"]);
 
-    const { allice, bob } = await getNamedAccounts();
+    const { deployer, allice, bob } = await getNamedAccounts();
+    DeployerAddress = deployer;
     AliceAddress = allice;
     BobAddress = bob;
 
     const ProxyFactory = await deployments.get("FathomProxyFactory");
     const proxyFactory = await ethers.getContractAt("FathomProxyFactory", ProxyFactory.address);
+
+    const Governor = await deployments.get("ProtocolGovernor");
+    governor = await ethers.getContractAt("ProtocolGovernor", Governor.address);
 
     const _WXDC = await deployments.get("WXDC");
     WXDC = await ethers.getContractAt("WXDC", _WXDC.address);
@@ -61,7 +72,49 @@ describe("LiquidationEngine", () => {
     fathomStablecoin = await getProxy(proxyFactory, "FathomStablecoin");
     priceOracle = await getProxy(proxyFactory, "PriceOracle");
     const proxyWalletRegistry = await getProxy(proxyFactory, "ProxyWalletRegistry");
-    proxyWalletRegistry.setDecentralizedMode(true);
+
+    const values = [0, 0, 0, 0, 0, 0, 0];
+    const targets = [
+      proxyWalletRegistry.address,
+      collateralPoolConfig.address,
+      collateralPoolConfig.address,
+      collateralPoolConfig.address,
+      collateralPoolConfig.address,
+      collateralPoolConfig.address,
+      liquidationEngineAsAdmin.address,
+    ];
+
+    const calldatas = [
+      proxyWalletRegistry.interface.encodeFunctionData("setDecentralizedMode", [true]),
+      collateralPoolConfig.interface.encodeFunctionData("setStabilityFeeRate", [pools.XDC, WeiPerRay]),
+      collateralPoolConfig.interface.encodeFunctionData("setLiquidationRatio", [pools.XDC, WeiPerRay]),
+      collateralPoolConfig.interface.encodeFunctionData("setLiquidatorIncentiveBps", [pools.XDC, LIQUIDATOR_INCENTIVE_BPS]),
+      collateralPoolConfig.interface.encodeFunctionData("setCloseFactorBps", [pools.XDC, CLOSE_FACTOR_BPS]),
+      collateralPoolConfig.interface.encodeFunctionData("setTreasuryFeesBps", [pools.XDC, TREASURY_FEE_BPS]),
+      liquidationEngineAsAdmin.interface.encodeFunctionData("addToWhitelist", [BobAddress]),
+    ];
+
+    const proposalTx = await governor.propose(targets, values, calldatas, "Set LiquidationEngine");
+    const proposalReceipt = await proposalTx.wait();
+    const proposalId = proposalReceipt.events[0].args.proposalId;
+
+     // wait for the voting period to pass
+    await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+    await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+    
+    await mine(VOTING_PERIOD + 1);
+
+    // Queue the TX
+    const descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set LiquidationEngine"));
+    await governor.queue(targets, values, calldatas, descriptionHash);
+
+    await time.increase(MIN_DELAY + 1);
+    await mine(1);
+
+    // Execute
+    await governor.execute(targets, values, calldatas, descriptionHash);
 
     liquidationEngine = await ethers.getContractAt("LiquidationEngine", liquidationEngineAsAdmin.address, provider.getSigner(BobAddress));
 
@@ -74,31 +127,73 @@ describe("LiquidationEngine", () => {
       proxyWallets: [aliceProxyWallet],
     } = await createProxyWallets([AliceAddress, BobAddress]));
 
-    await collateralPoolConfig.setStabilityFeeRate(pools.XDC, WeiPerRay);
-    await collateralPoolConfig.setLiquidationRatio(pools.XDC, WeiPerRay);
-    await collateralPoolConfig.setLiquidatorIncentiveBps(pools.XDC, LIQUIDATOR_INCENTIVE_BPS);
-    await collateralPoolConfig.setCloseFactorBps(pools.XDC, CLOSE_FACTOR_BPS);
-    await collateralPoolConfig.setTreasuryFeesBps(pools.XDC, TREASURY_FEE_BPS);
-
     await bookKeeper.connect(provider.getSigner(BobAddress)).whitelist(liquidationEngine.address);
     await bookKeeper.connect(provider.getSigner(BobAddress)).whitelist(fixedSpreadLiquidationStrategy.address);
-    await liquidationEngineAsAdmin.addToWhitelist(BobAddress);
   });
 
   describe("#liquidate", async () => {
     context("price drop but does not make the position underwater", async () => {
       it("should revert", async () => {
         // 1. Set price for XDC to 2 USD
-        await simplePriceFeed.setPrice(WeiPerRay.mul(2));
-        await priceOracle.setPrice(COLLATERAL_POOL_ID);
+        let values = [0, 0];
+        let targets = [simplePriceFeed.address, priceOracle.address];
+        let calldatas = [
+          simplePriceFeed.interface.encodeFunctionData("setPrice", [WeiPerRay.mul(2)]),
+          priceOracle.interface.encodeFunctionData("setPrice", [COLLATERAL_POOL_ID]),
+        ];
+
+        let proposalTx = await governor.propose(targets, values, calldatas, "Set Price");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+         // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set Price"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        await governor.execute(targets, values, calldatas, descriptionHash);
 
         // 2. Alice open a new position with 1 XDC and draw 1 FXD
         await PositionHelper.openXDCPositionAndDraw(aliceProxyWallet, AliceAddress, COLLATERAL_POOL_ID, WeiPerWad, WeiPerWad);
         const alicePositionAddress = await positionManager.positions(1);
 
-        // 3. XDC price drop to 1 USD
-        await simplePriceFeed.setPrice(WeiPerRay);
-        await priceOracle.setPrice(COLLATERAL_POOL_ID);
+        // // 3. XDC price drop to 1 USD
+        calldatas = [
+          simplePriceFeed.interface.encodeFunctionData("setPrice", [WeiPerRay]),
+          priceOracle.interface.encodeFunctionData("setPrice", [COLLATERAL_POOL_ID]),
+        ];
+        proposalTx = await governor.propose(targets, values, calldatas, "Set Price New");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+         // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set Price New"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        await governor.execute(targets, values, calldatas, descriptionHash);
 
         // 3.5 whitelist bob as liquidator
         // 4. Bob try to liquidate Alice's position but failed due to the price did not drop low enough
@@ -118,17 +213,72 @@ describe("LiquidationEngine", () => {
     context("safety buffer -0.1%, but liquidator does not have enough FXD to liquidate", async () => {
       it("should revert", async () => {
         // 1. Set priceWithSafetyMargin for XDC to 2 USD
-        await simplePriceFeed.setPrice(WeiPerRay.mul(2));
-        await priceOracle.setPrice(COLLATERAL_POOL_ID);
-        await collateralPoolConfig.setLiquidationRatio(COLLATERAL_POOL_ID, WeiPerRay);
+        let values = [0, 0, 0];
+        let targets = [simplePriceFeed.address, priceOracle.address, collateralPoolConfig.address];
+        let calldatas = [
+          simplePriceFeed.interface.encodeFunctionData("setPrice", [WeiPerRay.mul(2)]),
+          priceOracle.interface.encodeFunctionData("setPrice", [COLLATERAL_POOL_ID]),
+          collateralPoolConfig.interface.encodeFunctionData("setLiquidationRatio", [COLLATERAL_POOL_ID, WeiPerRay]),
+        ];
+
+        let proposalTx = await governor.propose(targets, values, calldatas, "Set Price");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+         // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set Price"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        // await simplePriceFeed.setPrice(WeiPerRay.mul(2));
+        // await priceOracle.setPrice(COLLATERAL_POOL_ID);
+        // await collateralPoolConfig.setLiquidationRatio(COLLATERAL_POOL_ID, WeiPerRay);
 
         // 2. Alice open a new position with 1 XDC and draw 1 FXD
         await PositionHelper.openXDCPositionAndDraw(aliceProxyWallet, AliceAddress, COLLATERAL_POOL_ID, WeiPerWad, WeiPerWad);
         const alicePositionAddress = await positionManager.positions(1);
 
         // 3. XDC price drop to 0.99 USD
-        await simplePriceFeed.setPrice(WeiPerRay.sub(1).div(1e9));
-        await priceOracle.setPrice(COLLATERAL_POOL_ID);
+        values = [0, 0];
+        targets = [simplePriceFeed.address, priceOracle.address];
+        calldatas = [
+          simplePriceFeed.interface.encodeFunctionData("setPrice", [WeiPerRay.sub(1).div(1e9)]),
+          priceOracle.interface.encodeFunctionData("setPrice", [COLLATERAL_POOL_ID]),
+        ];
+
+        proposalTx = await governor.propose(targets, values, calldatas, "Set Price New");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+         // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set Price New"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        await governor.execute(targets, values, calldatas, descriptionHash);
 
         // 4. Bob liquidate Alice's position up to full close factor successfully
         const debtShareToRepay = parseEther("0.5");
@@ -357,16 +507,50 @@ describe("LiquidationEngine", () => {
       for (let i = 0; i < testParams.length; i++) {
         const testParam = testParams[i];
         it(testParam.label, async () => {
-          await fathomStablecoin.connect(provider.getSigner(BobAddress)).approve(fixedSpreadLiquidationStrategy.address, ethers.constants.MaxUint256);
-          await fathomStablecoin.mint(BobAddress, parseUnits(testParam.debtShareToRepay, 46));
-
-          await collateralPoolConfig.setLiquidatorIncentiveBps(COLLATERAL_POOL_ID, testParam.liquidatorIncentiveBps);
-          await collateralPoolConfig.setCloseFactorBps(COLLATERAL_POOL_ID, testParam.closeFactorBps);
-          await simplePriceFeed.setPrice(parseUnits(testParam.startingPrice, 18));
-          await priceOracle.setPrice(COLLATERAL_POOL_ID);
           let ratio = WeiPerRay.mul(1000).div(parseUnits(testParam.collateralFactor, 3));
-          await collateralPoolConfig.setLiquidationRatio(COLLATERAL_POOL_ID, ratio);
-          await collateralPoolConfig.setDebtFloor(COLLATERAL_POOL_ID, parseUnits(testParam.debtFloor, 45));
+          await fathomStablecoin.connect(provider.getSigner(BobAddress)).approve(fixedSpreadLiquidationStrategy.address, ethers.constants.MaxUint256);
+          // 1. Set priceWithSafetyMargin for XDC to 2 USD
+          let values = [0, 0, 0, 0, 0, 0, 0];
+          let targets = [
+            fathomStablecoin.address,
+            collateralPoolConfig.address,
+            collateralPoolConfig.address,
+            simplePriceFeed.address,
+            priceOracle.address,
+            collateralPoolConfig.address,
+            collateralPoolConfig.address,
+          ];
+          let calldatas = [
+            fathomStablecoin.interface.encodeFunctionData("mint", [BobAddress, parseUnits(testParam.debtShareToRepay, 46)]),
+            collateralPoolConfig.interface.encodeFunctionData("setLiquidatorIncentiveBps", [COLLATERAL_POOL_ID, testParam.liquidatorIncentiveBps]),
+            collateralPoolConfig.interface.encodeFunctionData("setCloseFactorBps", [COLLATERAL_POOL_ID, testParam.closeFactorBps]),
+            simplePriceFeed.interface.encodeFunctionData("setPrice", [parseUnits(testParam.startingPrice, 18)]),
+            priceOracle.interface.encodeFunctionData("setPrice", [COLLATERAL_POOL_ID]),
+            collateralPoolConfig.interface.encodeFunctionData("setLiquidationRatio", [COLLATERAL_POOL_ID, ratio]),
+            collateralPoolConfig.interface.encodeFunctionData("setDebtFloor", [COLLATERAL_POOL_ID, parseUnits(testParam.debtFloor, 45)]),
+          ];
+
+          let proposalTx = await governor.propose(targets, values, calldatas, "Set Protocol Config");
+          let proposalReceipt = await proposalTx.wait();
+          let proposalId = proposalReceipt.events[0].args.proposalId;
+
+           // wait for the voting period to pass
+          await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+          await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+          
+          await mine(VOTING_PERIOD + 1);
+
+          // Queue the TX
+          let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set Protocol Config"));
+          await governor.queue(targets, values, calldatas, descriptionHash);
+
+          await time.increase(MIN_DELAY + 1);
+          await mine(1);
+
+          // Execute
+          await governor.execute(targets, values, calldatas, descriptionHash);
 
           // 2. Alice open a new position with 1 XDC and draw 1 FXD
           const lockedCollateralAmount = parseEther(testParam.collateralAmount);
@@ -383,8 +567,34 @@ describe("LiquidationEngine", () => {
           const alicePosition = await bookKeeper.positions(COLLATERAL_POOL_ID, alicePositionAddress);
 
           // 3. XDC price drop to 0.99 USD
-          await simplePriceFeed.setPrice(parseUnits(testParam.nextPrice, 18));
-          await priceOracle.setPrice(COLLATERAL_POOL_ID);
+          values = [0, 0];
+          targets = [simplePriceFeed.address, priceOracle.address];
+          calldatas = [
+            simplePriceFeed.interface.encodeFunctionData("setPrice", [parseUnits(testParam.nextPrice, 18)]),
+            priceOracle.interface.encodeFunctionData("setPrice", [COLLATERAL_POOL_ID]),
+          ];
+
+          proposalTx = await governor.propose(targets, values, calldatas, "Set Protocol Config");
+          proposalReceipt = await proposalTx.wait();
+          proposalId = proposalReceipt.events[0].args.proposalId;
+
+           // wait for the voting period to pass
+          await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+          await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+          
+          await mine(VOTING_PERIOD + 1);
+
+          // Queue the TX
+          descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set Protocol Config"));
+          await governor.queue(targets, values, calldatas, descriptionHash);
+
+          await time.increase(MIN_DELAY + 1);
+          await mine(1);
+
+          // Execute
+          await governor.execute(targets, values, calldatas, descriptionHash);
 
           // 4. Bob liquidate Alice's position up to full close factor successfully
           const debtShareToRepay = parseEther(testParam.debtShareToRepay);
@@ -399,7 +609,30 @@ describe("LiquidationEngine", () => {
           );
           const bobWETHAfterLiq = await WXDC.balanceOf(BobAddress);
           // 5. Settle system bad debt
-          await systemDebtEngine.settleSystemBadDebt(await bookKeeper.stablecoin(systemDebtEngine.address));
+          values = [0];
+          targets = [systemDebtEngine.address];
+          calldatas = [systemDebtEngine.interface.encodeFunctionData("settleSystemBadDebt", [await bookKeeper.stablecoin(systemDebtEngine.address)])];
+          proposalTx = await governor.propose(targets, values, calldatas, "Set Protocol Config");
+          proposalReceipt = await proposalTx.wait();
+          proposalId = proposalReceipt.events[0].args.proposalId;
+
+           // wait for the voting period to pass
+          await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+          await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+          
+          await mine(VOTING_PERIOD + 1);
+
+          // Queue the TX
+          descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set Protocol Config"));
+          await governor.queue(targets, values, calldatas, descriptionHash);
+
+          await time.increase(MIN_DELAY + 1);
+          await mine(1);
+
+          // Execute
+          await governor.execute(targets, values, calldatas, descriptionHash);
 
           const bobStablecoinAfterLiquidation = await fathomStablecoin.balanceOf(BobAddress); //await bookKeeper.stablecoin(BobAddress)
 
@@ -451,13 +684,46 @@ describe("LiquidationEngine", () => {
           expectedSystemBadDebt: "0",
         };
         it(testParam.label, async () => {
-          await collateralPoolConfig.setLiquidatorIncentiveBps(COLLATERAL_POOL_ID, testParam.liquidatorIncentiveBps);
-          await collateralPoolConfig.setCloseFactorBps(COLLATERAL_POOL_ID, testParam.closeFactorBps);
-          await simplePriceFeed.setPrice(parseUnits(testParam.startingPrice, 18));
-          await priceOracle.setPrice(COLLATERAL_POOL_ID);
           let ratio = WeiPerRay.mul(1000).div(parseUnits(testParam.collateralFactor, 3));
-          await collateralPoolConfig.setLiquidationRatio(COLLATERAL_POOL_ID, ratio);
-          await collateralPoolConfig.setDebtFloor(COLLATERAL_POOL_ID, parseUnits(testParam.debtFloor, 45));
+          let values = [0, 0, 0, 0, 0, 0];
+          let targets = [
+            collateralPoolConfig.address,
+            collateralPoolConfig.address,
+            simplePriceFeed.address,
+            priceOracle.address,
+            collateralPoolConfig.address,
+            collateralPoolConfig.address,
+          ];
+          let calldatas = [
+            collateralPoolConfig.interface.encodeFunctionData("setLiquidatorIncentiveBps", [COLLATERAL_POOL_ID, testParam.liquidatorIncentiveBps]),
+            collateralPoolConfig.interface.encodeFunctionData("setCloseFactorBps", [COLLATERAL_POOL_ID, testParam.closeFactorBps]),
+            simplePriceFeed.interface.encodeFunctionData("setPrice", [parseUnits(testParam.startingPrice, 18)]),
+            priceOracle.interface.encodeFunctionData("setPrice", [COLLATERAL_POOL_ID]),
+            collateralPoolConfig.interface.encodeFunctionData("setLiquidationRatio", [COLLATERAL_POOL_ID, ratio]),
+            collateralPoolConfig.interface.encodeFunctionData("setDebtFloor", [COLLATERAL_POOL_ID, parseUnits(testParam.debtFloor, 45)]),
+          ];
+
+          let proposalTx = await governor.propose(targets, values, calldatas, "Set Protocol Config");
+          let proposalReceipt = await proposalTx.wait();
+          let proposalId = proposalReceipt.events[0].args.proposalId;
+
+           // wait for the voting period to pass
+          await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+          await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+          
+          await mine(VOTING_PERIOD + 1);
+
+          // Queue the TX
+          let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set Protocol Config"));
+          await governor.queue(targets, values, calldatas, descriptionHash);
+
+          await time.increase(MIN_DELAY + 1);
+          await mine(1);
+
+          // Execute
+          await governor.execute(targets, values, calldatas, descriptionHash);
 
           // 2. Alice open a new position with 1 XDC and draw 1 FXD
           const lockedCollateralAmount = parseEther(testParam.collateralAmount);
@@ -475,8 +741,33 @@ describe("LiquidationEngine", () => {
           const alicePosition = await bookKeeper.positions(COLLATERAL_POOL_ID, alicePositionAddress);
 
           // 3. XDC price drop to 0.99 USD
-          await simplePriceFeed.setPrice(parseUnits(testParam.nextPrice, 18));
-          await priceOracle.setPrice(COLLATERAL_POOL_ID);
+          values = [0, 0];
+          targets = [simplePriceFeed.address, priceOracle.address];
+          calldatas = [
+            simplePriceFeed.interface.encodeFunctionData("setPrice", [parseUnits(testParam.nextPrice, 18)]),
+            priceOracle.interface.encodeFunctionData("setPrice", [COLLATERAL_POOL_ID]),
+          ];
+          proposalTx = await governor.propose(targets, values, calldatas, "Set Protocol Config");
+          proposalReceipt = await proposalTx.wait();
+          proposalId = proposalReceipt.events[0].args.proposalId;
+
+           // wait for the voting period to pass
+          await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+          await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+          
+          await mine(VOTING_PERIOD + 1);
+
+          // Queue the TX
+          descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set Protocol Config"));
+          await governor.queue(targets, values, calldatas, descriptionHash);
+
+          await time.increase(MIN_DELAY + 1);
+          await mine(1);
+
+          // Execute
+          await governor.execute(targets, values, calldatas, descriptionHash);
 
           // 4. Bob liquidate Alice's position up to full close factor successfully
           const debtShareToRepay = parseEther(testParam.debtShareToRepay);
@@ -491,7 +782,30 @@ describe("LiquidationEngine", () => {
           );
 
           // 5. Settle system bad debt
-          await systemDebtEngine.settleSystemBadDebt(await bookKeeper.stablecoin(systemDebtEngine.address));
+          values = [0];
+          targets = [systemDebtEngine.address];
+          calldatas = [systemDebtEngine.interface.encodeFunctionData("settleSystemBadDebt", [await bookKeeper.stablecoin(systemDebtEngine.address)])];
+          proposalTx = await governor.propose(targets, values, calldatas, "Set Protocol Config");
+          proposalReceipt = await proposalTx.wait();
+          proposalId = proposalReceipt.events[0].args.proposalId;
+
+           // wait for the voting period to pass
+          await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+          await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+          
+          await mine(VOTING_PERIOD + 1);
+
+          // Queue the TX
+          descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set Protocol Config"));
+          await governor.queue(targets, values, calldatas, descriptionHash);
+
+          await time.increase(MIN_DELAY + 1);
+          await mine(1);
+
+          // Execute
+          await governor.execute(targets, values, calldatas, descriptionHash);
 
           const bobStablecoinAfterLiquidation = await bookKeeper.stablecoin(BobAddress);
 
@@ -547,17 +861,56 @@ describe("LiquidationEngine", () => {
 
     context("safety buffer -20%, position is liquidated up to full close factor with some interest and debt floor", async () => {
       it("should success", async () => {
+        let ratio = WeiPerRay.mul(1000).div(parseUnits("0.8", 3));
         // 0 whitelist bob as liquidator
-        await fathomStablecoin.mint(BobAddress, parseUnits("3000", 45));
-        await fathomStablecoin.connect(provider.getSigner(BobAddress)).approve(fixedSpreadLiquidationStrategy.address, ethers.constants.MaxUint256);
+        let values = [0, 0, 0, 0, 0];
+        let targets = [
+          fathomStablecoin.address,
+          simplePriceFeed.address,
+          priceOracle.address,
+          collateralPoolConfig.address,
+          collateralPoolConfig.address,
+        ];
+        let calldatas = [
+          fathomStablecoin.interface.encodeFunctionData("mint", [BobAddress, parseUnits("3000", 45)]),
+          simplePriceFeed.interface.encodeFunctionData("setPrice", [parseUnits("367", 18)]),
+          priceOracle.interface.encodeFunctionData("setPrice", [COLLATERAL_POOL_ID]),
+          collateralPoolConfig.interface.encodeFunctionData("setLiquidationRatio", [COLLATERAL_POOL_ID, ratio]),
+          collateralPoolConfig.interface.encodeFunctionData("setDebtFloor", [COLLATERAL_POOL_ID, parseEther("100").mul(WeiPerRay)]),
+        ];
+        let proposalTx = await governor.propose(targets, values, calldatas, "Set Protocol Config");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+         // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set Protocol Config"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        await governor.execute(targets, values, calldatas, descriptionHash);
+
+        /** await fathomStablecoin.mint(BobAddress, parseUnits("3000", 45)); */
 
         // 1. Set priceWithSafetyMargin for XDC to 420 USD
-        await simplePriceFeed.setPrice(parseUnits("367", 18));
-        await priceOracle.setPrice(COLLATERAL_POOL_ID);
-        let ratio = WeiPerRay.mul(1000).div(parseUnits("0.8", 3));
-        await collateralPoolConfig.setLiquidationRatio(COLLATERAL_POOL_ID, ratio);
+        /**await simplePriceFeed.setPrice(parseUnits("367", 18)); */
+        /** await priceOracle.setPrice(COLLATERAL_POOL_ID); */
+
+        /** await collateralPoolConfig.setLiquidationRatio(COLLATERAL_POOL_ID, ratio); */
         //   await collateralPoolConfig.setPriceWithSafetyMargin(COLLATERAL_POOL_ID, parseUnits("294", 27), { gasLimit: 1000000 })
-        await collateralPoolConfig.setDebtFloor(COLLATERAL_POOL_ID, parseEther("100").mul(WeiPerRay));
+        /** await collateralPoolConfig.setDebtFloor(COLLATERAL_POOL_ID, parseEther("100").mul(WeiPerRay)); */
+
+        await fathomStablecoin.connect(provider.getSigner(BobAddress)).approve(fixedSpreadLiquidationStrategy.address, ethers.constants.MaxUint256);
 
         // 2. Alice open a new position with 10 XDC and draw 2000 FXD
         const lockedCollateralAmount = parseEther("10");
@@ -566,7 +919,36 @@ describe("LiquidationEngine", () => {
         await PositionHelper.openXDCPositionAndDraw(aliceProxyWallet, AliceAddress, COLLATERAL_POOL_ID, lockedCollateralAmount, drawStablecoinAmount);
 
         // Set stability fee rate to 0.5% APR
-        await collateralPoolConfig.setStabilityFeeRate(COLLATERAL_POOL_ID, BigNumber.from("1000000000158153903837946258"));
+        values = [0];
+        targets = [collateralPoolConfig.address];
+        calldatas = [
+          collateralPoolConfig.interface.encodeFunctionData("setStabilityFeeRate", [
+            COLLATERAL_POOL_ID,
+            BigNumber.from("1000000000158153903837946258"),
+          ]),
+        ];
+        proposalTx = await governor.propose(targets, values, calldatas, "Set Stability Fee Rate");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+         // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set Stability Fee Rate"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        /** await collateralPoolConfig.setStabilityFeeRate(COLLATERAL_POOL_ID, BigNumber.from("1000000000158153903837946258")); */
 
         const alicePositionAddress = await positionManager.positions(1);
         // const fathomStablecoinBalance = await fathomStablecoin.balanceOf(AliceAddress)
@@ -579,8 +961,36 @@ describe("LiquidationEngine", () => {
           (await collateralPoolConfig.collateralPools(COLLATERAL_POOL_ID)).debtAccumulatedRate
         );
         AssertHelpers.assertAlmostEqual(aliceDebtValueAfterOneYear.toString(), parseEther("2010").mul(WeiPerRay).toString());
-        await simplePriceFeed.setPrice(parseEther("249.37"));
-        await priceOracle.setPrice(COLLATERAL_POOL_ID);
+        values = [0, 0];
+        targets = [simplePriceFeed.address, priceOracle.address];
+        calldatas = [
+          simplePriceFeed.interface.encodeFunctionData("setPrice", [parseEther("249.37")]),
+          priceOracle.interface.encodeFunctionData("setPrice", [COLLATERAL_POOL_ID]),
+        ];
+        proposalTx = await governor.propose(targets, values, calldatas, "Set Price");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+         // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set Price"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        await governor.execute(targets, values, calldatas, descriptionHash);
+
+        /** await simplePriceFeed.setPrice(parseEther("249.37")); */
+        /** await priceOracle.setPrice(COLLATERAL_POOL_ID); */
 
         // 4. Bob liquidate Alice's position up to full close factor successfully
         const debtShareToRepay = parseEther("1000");
@@ -596,7 +1006,33 @@ describe("LiquidationEngine", () => {
         const bobWETHAfterLiq = await WXDC.balanceOf(BobAddress);
 
         // // 5. Settle system bad debt
-        await systemDebtEngine.settleSystemBadDebt(await bookKeeper.systemBadDebt(systemDebtEngine.address));
+        values = [0];
+        targets = [systemDebtEngine.address];
+        calldatas = [
+          systemDebtEngine.interface.encodeFunctionData("settleSystemBadDebt", [await bookKeeper.systemBadDebt(systemDebtEngine.address)]),
+        ];
+        proposalTx = await governor.propose(targets, values, calldatas, "Settle System Bad Debt");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+         // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Settle System Bad Debt"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        /** await systemDebtEngine.settleSystemBadDebt(await bookKeeper.systemBadDebt(systemDebtEngine.address)); */
         AssertHelpers.assertAlmostEqual(
           (await bookKeeper.stablecoin(systemDebtEngine.address)).toString(),
           parseEther("10").mul(WeiPerRay).toString()
@@ -643,16 +1079,56 @@ describe("LiquidationEngine", () => {
       ];
       const testParam = testParams[0];
       it(testParam.label, async () => {
-        await fathomStablecoin.mint(BobAddress, parseUnits("2000", 46));
-        await fathomStablecoin.connect(provider.getSigner(BobAddress)).approve(fixedSpreadLiquidationStrategy.address, ethers.constants.MaxUint256);
-
-        await collateralPoolConfig.setLiquidatorIncentiveBps(COLLATERAL_POOL_ID, testParam.liquidatorIncentiveBps);
-        await collateralPoolConfig.setCloseFactorBps(COLLATERAL_POOL_ID, testParam.closeFactorBps);
-        await simplePriceFeed.setPrice(parseUnits(testParam.startingPrice, 18));
-        await priceOracle.setPrice(COLLATERAL_POOL_ID);
         let ratio = WeiPerRay.mul(1000).div(parseUnits(testParam.collateralFactor, 3));
-        await collateralPoolConfig.setLiquidationRatio(COLLATERAL_POOL_ID, ratio);
-        await collateralPoolConfig.setDebtFloor(COLLATERAL_POOL_ID, parseUnits(testParam.debtFloor, 45));
+        let values = [0, 0, 0, 0, 0, 0, 0];
+        let targets = [
+          fathomStablecoin.address,
+          collateralPoolConfig.address,
+          collateralPoolConfig.address,
+          simplePriceFeed.address,
+          priceOracle.address,
+          collateralPoolConfig.address,
+          collateralPoolConfig.address,
+        ];
+        let calldatas = [
+          fathomStablecoin.interface.encodeFunctionData("mint", [BobAddress, parseUnits("2000", 46)]),
+          collateralPoolConfig.interface.encodeFunctionData("setLiquidatorIncentiveBps", [COLLATERAL_POOL_ID, testParam.liquidatorIncentiveBps]),
+          collateralPoolConfig.interface.encodeFunctionData("setCloseFactorBps", [COLLATERAL_POOL_ID, testParam.closeFactorBps]),
+          simplePriceFeed.interface.encodeFunctionData("setPrice", [parseUnits(testParam.startingPrice, 18)]),
+          priceOracle.interface.encodeFunctionData("setPrice", [COLLATERAL_POOL_ID]),
+          collateralPoolConfig.interface.encodeFunctionData("setLiquidationRatio", [COLLATERAL_POOL_ID, ratio]),
+          collateralPoolConfig.interface.encodeFunctionData("setDebtFloor", [COLLATERAL_POOL_ID, parseUnits(testParam.debtFloor, 45)]),
+        ];
+        /** await fathomStablecoin.mint(BobAddress, parseUnits("2000", 46)); */
+        await fathomStablecoin.connect(provider.getSigner(BobAddress)).approve(fixedSpreadLiquidationStrategy.address, ethers.constants.MaxUint256);
+        let proposalTx = await governor.propose(targets, values, calldatas, "Set Protocol Config");
+        let proposalReceipt = await proposalTx.wait();
+        let proposalId = proposalReceipt.events[0].args.proposalId;
+
+         // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        let descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set Protocol Config"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        /** await collateralPoolConfig.setLiquidatorIncentiveBps(COLLATERAL_POOL_ID, testParam.liquidatorIncentiveBps); */
+        /** await collateralPoolConfig.setCloseFactorBps(COLLATERAL_POOL_ID, testParam.closeFactorBps); */
+        /** await simplePriceFeed.setPrice(parseUnits(testParam.startingPrice, 18)); */
+        /** await priceOracle.setPrice(COLLATERAL_POOL_ID); */
+
+        /** await collateralPoolConfig.setLiquidationRatio(COLLATERAL_POOL_ID, ratio); */
+        /** await collateralPoolConfig.setDebtFloor(COLLATERAL_POOL_ID, parseUnits(testParam.debtFloor, 45)); */
 
         // 2. Alice open a new position with 1 XDC and draw 1 FXD
         const lockedCollateralAmount = parseEther(testParam.collateralAmount);
@@ -666,8 +1142,35 @@ describe("LiquidationEngine", () => {
         const alicePosition = await bookKeeper.positions(COLLATERAL_POOL_ID, alicePositionAddress1);
 
         // 3. XDC price drop to 0.99 USD
-        await simplePriceFeed.setPrice(parseUnits(testParam.nextPrice, 18));
-        await priceOracle.setPrice(COLLATERAL_POOL_ID);
+        values = [0, 0];
+        targets = [simplePriceFeed.address, priceOracle.address];
+        calldatas = [
+          simplePriceFeed.interface.encodeFunctionData("setPrice", [parseUnits(testParam.nextPrice, 18)]),
+          priceOracle.interface.encodeFunctionData("setPrice", [COLLATERAL_POOL_ID]),
+        ];
+        proposalTx = await governor.propose(targets, values, calldatas, "Set Price");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+         // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set Price"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        /** await simplePriceFeed.setPrice(parseUnits(testParam.nextPrice, 18)); */
+        /** await priceOracle.setPrice(COLLATERAL_POOL_ID); */
 
         // 4. Bob liquidate Alice's position up to full close factor successfully
         const debtShareToRepay = parseEther(testParam.debtShareToRepay);
@@ -684,7 +1187,31 @@ describe("LiquidationEngine", () => {
         const bobWETHAfterLiq = await WXDC.balanceOf(BobAddress);
 
         // 5. Settle system bad debt
-        await systemDebtEngine.settleSystemBadDebt(await bookKeeper.stablecoin(systemDebtEngine.address));
+        values = [0];
+        targets = [systemDebtEngine.address];
+        calldatas = [systemDebtEngine.interface.encodeFunctionData("settleSystemBadDebt", [await bookKeeper.stablecoin(systemDebtEngine.address)])];
+        proposalTx = await governor.propose(targets, values, calldatas, "Set System Debt Engine");
+        proposalReceipt = await proposalTx.wait();
+        proposalId = proposalReceipt.events[0].args.proposalId;
+
+         // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set System Debt Engine"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        await governor.execute(targets, values, calldatas, descriptionHash);
+        /** await systemDebtEngine.settleSystemBadDebt(await bookKeeper.stablecoin(systemDebtEngine.address)); */
 
         const bobStablecoinAfterLiquidation = await fathomStablecoin.balanceOf(BobAddress);
 

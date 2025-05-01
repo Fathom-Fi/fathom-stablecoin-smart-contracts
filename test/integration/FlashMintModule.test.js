@@ -1,10 +1,17 @@
 const { ethers } = require("hardhat");
+const provider = ethers.provider;
 const { expect } = require("chai");
 const { parseEther } = ethers.utils;
+const { time, mine } = require("@nomicfoundation/hardhat-network-helpers");
 
 const { WeiPerRay, WeiPerRad } = require("../helper/unit");
 
 const { getProxy } = require("../../common/proxies");
+
+const MIN_DELAY = 3600; // 1 hour
+const VOTING_PERIOD = 50400; // This is how long voting lasts, 1 week
+const VOTING_DELAY = 1; // How many blocks till a proposal vote becomes active
+const VOTE_WAY = 1;
 
 describe("FlastMintModule", () => {
   // Contracts
@@ -19,6 +26,7 @@ describe("FlastMintModule", () => {
   let bookKeeperFlashMintArbitrager;
   let stablecoinAdapter;
   let DeployerAddress;
+  let governor;
 
   beforeEach(async () => {
     await deployments.fixture(["DeployTestFixture"]);
@@ -27,6 +35,9 @@ describe("FlastMintModule", () => {
 
     const ProxyFactory = await deployments.get("FathomProxyFactory");
     const proxyFactory = await ethers.getContractAt("FathomProxyFactory", ProxyFactory.address);
+
+    const Governor = await deployments.get("ProtocolGovernor");
+    governor = await ethers.getContractAt("ProtocolGovernor", Governor.address);
 
     bookKeeper = await getProxy(proxyFactory, "BookKeeper");
     stableSwapModule = await getProxy(proxyFactory, "StableSwapModule");
@@ -48,15 +59,46 @@ describe("FlastMintModule", () => {
   describe("#flashLoan", async () => {
     context("receiver doesn't have enough tokens to return the loan + fee", async () => {
       it("should revert", async () => {
-        await fathomStablecoin.mint(DeployerAddress, parseEther("3000"));
-        await bookKeeper.mintUnbackedStablecoin(stablecoinAdapter.address, stablecoinAdapter.address, WeiPerRad.mul(3500));
+        const values = [0, 0, 0, 0];
+        const targets = [fathomStablecoin.address, bookKeeper.address, flashMintModule.address, stableSwapModule.address];
+
+        const calldatas = [
+          fathomStablecoin.interface.encodeFunctionData("mint", [DeployerAddress, parseEther("3000")]),
+          bookKeeper.interface.encodeFunctionData("mintUnbackedStablecoin", [
+            stablecoinAdapter.address,
+            stablecoinAdapter.address,
+            WeiPerRad.mul(3500),
+          ]),
+          flashMintModule.interface.encodeFunctionData("addToWhitelist", [DeployerAddress]),
+          stableSwapModule.interface.encodeFunctionData("addToWhitelist", [flashMintArbitrager.address]),
+        ];
+
+        const proposalTx = await governor.propose(targets, values, calldatas, "Set FlashMintModule");
+        const proposalReceipt = await proposalTx.wait();
+        const proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        const descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set FlashMintModule"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        await governor.execute(targets, values, calldatas, descriptionHash);
+
         await fathomStablecoin.approve(stableSwapModuleWrapper.address, parseEther("3000"));
         await USDT.mint(DeployerAddress, parseEther("3500"));
         await USDT.approve(stableSwapModuleWrapper.address, parseEther("3000"));
         await stableSwapModuleWrapper.depositTokens(parseEther("3000"));
 
-        await flashMintModule.addToWhitelist(DeployerAddress);
-        await stableSwapModule.addToWhitelist(flashMintArbitrager.address);
         await USDT.approve(router.address, parseEther("500"));
         await router.deposit(USDT.address, parseEther("500"));
         await expect(
@@ -72,15 +114,45 @@ describe("FlastMintModule", () => {
 
     context("receiver has enough tokens to return the loan + fee", async () => {
       it("should success", async () => {
-        await fathomStablecoin.mint(DeployerAddress, parseEther("3500"));
-        await bookKeeper.mintUnbackedStablecoin(stablecoinAdapter.address, stablecoinAdapter.address, WeiPerRad.mul(3500));
+        const values = [0, 0, 0, 0];
+        const targets = [fathomStablecoin.address, bookKeeper.address, flashMintModule.address, stableSwapModule.address];
+
+        const calldatas = [
+          fathomStablecoin.interface.encodeFunctionData("mint", [DeployerAddress, parseEther("3500")]),
+          bookKeeper.interface.encodeFunctionData("mintUnbackedStablecoin", [
+            stablecoinAdapter.address,
+            stablecoinAdapter.address,
+            WeiPerRad.mul(3500),
+          ]),
+          flashMintModule.interface.encodeFunctionData("addToWhitelist", [DeployerAddress]),
+          stableSwapModule.interface.encodeFunctionData("addToWhitelist", [flashMintArbitrager.address]),
+        ];
+
+        const proposalTx = await governor.propose(targets, values, calldatas, "Set FlashMintModule");
+        const proposalReceipt = await proposalTx.wait();
+        const proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        const descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set FlashMintModule"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        await governor.execute(targets, values, calldatas, descriptionHash);
         await fathomStablecoin.approve(stableSwapModuleWrapper.address, parseEther("3000"));
         await USDT.mint(DeployerAddress, parseEther("3500"));
         await USDT.approve(stableSwapModuleWrapper.address, parseEther("3000"));
         await stableSwapModuleWrapper.depositTokens(parseEther("3000"));
 
-        await flashMintModule.addToWhitelist(DeployerAddress);
-        await stableSwapModule.addToWhitelist(flashMintArbitrager.address);
         await USDT.approve(router.address, parseEther("500"));
         await router.deposit(USDT.address, parseEther("500"));
         await router.setProfit(true);
@@ -133,15 +205,46 @@ describe("FlastMintModule", () => {
   describe("#bookKeeperFlashLoan", async () => {
     context("receiver doesn't have enough tokens to return the loan + fee", async () => {
       it("should revert", async () => {
-        await fathomStablecoin.mint(DeployerAddress, parseEther("3500"));
-        await bookKeeper.mintUnbackedStablecoin(stablecoinAdapter.address, stablecoinAdapter.address, WeiPerRad.mul(3500));
+        const values = [0, 0, 0, 0];
+        const targets = [fathomStablecoin.address, bookKeeper.address, flashMintModule.address, stableSwapModule.address];
+
+        const calldatas = [
+          fathomStablecoin.interface.encodeFunctionData("mint", [DeployerAddress, parseEther("3500")]),
+          bookKeeper.interface.encodeFunctionData("mintUnbackedStablecoin", [
+            stablecoinAdapter.address,
+            stablecoinAdapter.address,
+            WeiPerRad.mul(3500),
+          ]),
+          flashMintModule.interface.encodeFunctionData("addToWhitelist", [DeployerAddress]),
+          stableSwapModule.interface.encodeFunctionData("addToWhitelist", [bookKeeperFlashMintArbitrager.address]),
+        ];
+
+        const proposalTx = await governor.propose(targets, values, calldatas, "Set FlashMintModule");
+        const proposalReceipt = await proposalTx.wait();
+        const proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        const descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set FlashMintModule"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        await governor.execute(targets, values, calldatas, descriptionHash);
+
         await fathomStablecoin.approve(stableSwapModuleWrapper.address, parseEther("3000"));
         await USDT.mint(DeployerAddress, parseEther("3500"));
         await USDT.approve(stableSwapModuleWrapper.address, parseEther("3000"));
         await stableSwapModuleWrapper.depositTokens(parseEther("3000"));
 
-        await flashMintModule.addToWhitelist(DeployerAddress);
-        await stableSwapModule.addToWhitelist(bookKeeperFlashMintArbitrager.address);
         await USDT.approve(router.address, parseEther("500"));
         await router.deposit(USDT.address, parseEther("500"));
 
@@ -157,15 +260,46 @@ describe("FlastMintModule", () => {
 
     context("receiver has enough tokens to return the loan + fee", async () => {
       it("should success", async () => {
-        await fathomStablecoin.mint(DeployerAddress, parseEther("3500"));
-        await bookKeeper.mintUnbackedStablecoin(stablecoinAdapter.address, stablecoinAdapter.address, WeiPerRad.mul(3500));
+        const values = [0, 0, 0, 0];
+        const targets = [fathomStablecoin.address, bookKeeper.address, flashMintModule.address, stableSwapModule.address];
+
+        const calldatas = [
+          fathomStablecoin.interface.encodeFunctionData("mint", [DeployerAddress, parseEther("3500")]),
+          bookKeeper.interface.encodeFunctionData("mintUnbackedStablecoin", [
+            stablecoinAdapter.address,
+            stablecoinAdapter.address,
+            WeiPerRad.mul(3500),
+          ]),
+          flashMintModule.interface.encodeFunctionData("addToWhitelist", [DeployerAddress]),
+          stableSwapModule.interface.encodeFunctionData("addToWhitelist", [bookKeeperFlashMintArbitrager.address]),
+        ];
+
+        const proposalTx = await governor.propose(targets, values, calldatas, "Set FlashMintModule");
+        const proposalReceipt = await proposalTx.wait();
+        const proposalId = proposalReceipt.events[0].args.proposalId;
+
+        // wait for the voting period to pass
+        await mine(VOTING_DELAY + 1); // wait for the voting period to pass
+
+        await governor.connect(provider.getSigner(DeployerAddress)).castVote(proposalId, VOTE_WAY);
+
+        await mine(VOTING_PERIOD + 1);
+
+        // Queue the TX
+        const descriptionHash = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("Set FlashMintModule"));
+        await governor.queue(targets, values, calldatas, descriptionHash);
+
+        await time.increase(MIN_DELAY + 1);
+        await mine(1);
+
+        // Execute
+        await governor.execute(targets, values, calldatas, descriptionHash);
+
         await fathomStablecoin.approve(stableSwapModuleWrapper.address, parseEther("3000"));
         await USDT.mint(DeployerAddress, parseEther("3500"));
         await USDT.approve(stableSwapModuleWrapper.address, parseEther("3000"));
         await stableSwapModuleWrapper.depositTokens(parseEther("3000"));
 
-        await flashMintModule.addToWhitelist(DeployerAddress);
-        await stableSwapModule.addToWhitelist(bookKeeperFlashMintArbitrager.address);
         await USDT.approve(router.address, parseEther("500"));
         await router.deposit(USDT.address, parseEther("500"));
         await router.setProfit(true);
