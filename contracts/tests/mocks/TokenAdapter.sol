@@ -60,7 +60,7 @@ contract TokenAdapter is PausableUpgradeable, ReentrancyGuardUpgradeable, IGener
         collateralPoolId = _collateralPoolId;
         collateralToken = _collateralToken;
         decimals = IToken(_collateralToken).decimals();
-        require(decimals == 18, "TokenAdapter/bad-token-decimals");
+        require(decimals <= 18, "TokenAdapter/decimals-too-high");
     }
 
     /// @dev Cage function halts TokenAdapter contract for good.

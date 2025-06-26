@@ -482,7 +482,8 @@ contract FathomStablecoinProxyActions is CommonMath {
         // For those collaterals that have less than 18 decimals precision we need to do the conversion before passing to adjustPosition function
         // Adapters will automatically handle the difference of precision
         uint256 decimals = IToken(IGenericTokenAdapter(_tokenAdapter).collateralToken()).decimals();
-        _wad = decimals < 18 ? _amt * (10 ** (18 - decimals)) : _amt / (10 ** (decimals - 18));
+        require(decimals <= 18, "FathomStablecoinProxyActions/decimals-too-high");
+        _wad = decimals < 18 ? _amt * (10 ** (18 - decimals)) : _amt;
     }
 
     function _getWipeDebtShare(

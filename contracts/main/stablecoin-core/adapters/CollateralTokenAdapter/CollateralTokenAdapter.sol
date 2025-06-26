@@ -9,24 +9,29 @@ import "../../../interfaces/ICollateralAdapter.sol";
 import "../../../interfaces/ICagable.sol";
 import "../../../interfaces/IProxyRegistry.sol";
 import "../../../interfaces/IVault.sol";
+import "../../../interfaces/IGenericTokenAdapter.sol";
+import "../../../interfaces/IToken.sol";
 import "../../../utils/SafeToken.sol";
 import "../../../utils/CommonMath.sol";
 
 /// @title CollateralTokenAdapter
 /// @dev receives collateral from users and deposit in Vault.
-contract CollateralTokenAdapter is CommonMath, ICollateralAdapter, PausableUpgradeable, ReentrancyGuardUpgradeable, ICagable {
+contract CollateralTokenAdapter is CommonMath, IGenericTokenAdapter, ICollateralAdapter, PausableUpgradeable, ReentrancyGuardUpgradeable, ICagable {
     using SafeToken for address;
 
     uint256 public live;
     bool public flagVault;
 
-    address public collateralToken;
+    address public override collateralToken;
     IBookKeeper public bookKeeper;
     bytes32 public override collateralPoolId;
 
     IVault public vault;
 
     IProxyRegistry public proxyWalletFactory;
+
+    /// @dev decimals of the collateral token
+    uint256 public override decimals;
 
     /// @dev Total CollateralTokens that has been staked in WAD
     uint256 public totalShare;
@@ -80,6 +85,9 @@ contract CollateralTokenAdapter is CommonMath, ICollateralAdapter, PausableUpgra
         collateralToken = _collateralToken;
         bookKeeper = IBookKeeper(_bookKeeper);
         proxyWalletFactory = IProxyRegistry(_proxyWalletFactory);
+        
+        decimals = IToken(_collateralToken).decimals();
+        require(decimals <= 18, "CollateralTokenAdapter/decimals-too-high");
     }
 
     /// @notice Adds an address to the whitelist, allowing it to interact with the contract

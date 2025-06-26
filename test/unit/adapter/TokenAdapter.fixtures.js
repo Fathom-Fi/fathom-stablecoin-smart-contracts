@@ -13,9 +13,12 @@ const deployFixtures = async () => {
   const mockedVault = await smock.fake("Vault");
 
   const mockedBookKeeper = await smock.fake("BookKeeper");
-  const mockedToken = await smock.fake("ERC20Mintable");
+  
+  // Create a real 9 decimals token for testing
+  const ERC20Mintable9DecimalsFactory = await ethers.getContractFactory("ERC20Mintable9Decimals");
+  const mockedToken = await ERC20Mintable9DecimalsFactory.deploy("Test Token 9", "TT9");
+  await mockedToken.deployed();
 
-  mockedToken.decimals.returns(18);
   mockedAccessControlConfig.OWNER_ROLE.returns(formatBytes32String("OWNER_ROLE"));
   mockedAccessControlConfig.GOV_ROLE.returns(formatBytes32String("GOV_ROLE"));
   mockedAccessControlConfig.SHOW_STOPPER_ROLE.returns(formatBytes32String("SHOW_STOPPER_ROLE"));

@@ -16,6 +16,8 @@ contract SimplePriceFeed is PausableUpgradeable, AccessControlUpgradeable, IPric
 
     uint256 public priceLife;
 
+    event LogSetPriceLife(address indexed _caller, uint256 _priceLife);
+
     function initialize(address _accessControlConfig) external initializer {
         PausableUpgradeable.__Pausable_init();
         AccessControlUpgradeable.__AccessControl_init();
