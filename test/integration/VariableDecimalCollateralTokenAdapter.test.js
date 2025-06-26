@@ -1,9 +1,10 @@
-const { ethers, deployments, getNamedAccounts } = require("hardhat");
+const { ethers } = require("hardhat");
+const { getNamedAccounts } = require("hardhat");
 const { BigNumber } = ethers;
 const { formatBytes32String } = ethers.utils;
 const { expect } = require("chai");
 
-const { loadFixturePhase } = require("../helper/test-helpers");
+// const { loadFixturePhase } = require("../helper/test-helpers");
 
 describe("VariableDecimalCollateralTokenAdapter Integration", () => {
   let bookKeeper;
@@ -150,8 +151,9 @@ describe("VariableDecimalCollateralTokenAdapter Integration", () => {
           .deposit(AliceAddress, tokenAmount, ethers.utils.defaultAbiCoder.encode(["address"], [AliceAddress]));
 
         // Check internal bookkeeping (should be in WAD - 18 decimals)
-        expect(await bookKeeper.collateralToken(formatBytes32String("9DECIMALS"), AliceAddress)).to.equal(tokenAmount);
-        expect(await collateralTokenAdapter.totalShare()).to.equal(tokenAmount);
+        const wadAmount = tokenAmount.mul(BigNumber.from(10).pow(9)); // Convert 9 decimals to 18 decimals
+        expect(await bookKeeper.collateralToken(formatBytes32String("9DECIMALS"), AliceAddress)).to.equal(wadAmount);
+        expect(await collateralTokenAdapter.totalShare()).to.equal(wadAmount);
 
         // Withdraw
         await collateralTokenAdapter
@@ -175,7 +177,8 @@ describe("VariableDecimalCollateralTokenAdapter Integration", () => {
           .connect(ethers.provider.getSigner(AliceAddress))
           .deposit(AliceAddress, fractionalAmount, ethers.utils.defaultAbiCoder.encode(["address"], [AliceAddress]));
 
-        expect(await bookKeeper.collateralToken(formatBytes32String("9DECIMALS"), AliceAddress)).to.equal(fractionalAmount);
+        const wadFractionalAmount = fractionalAmount.mul(BigNumber.from(10).pow(9)); // Convert 9 decimals to 18 decimals
+        expect(await bookKeeper.collateralToken(formatBytes32String("9DECIMALS"), AliceAddress)).to.equal(wadFractionalAmount);
       });
     });
 

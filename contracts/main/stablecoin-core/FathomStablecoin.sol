@@ -6,6 +6,11 @@ import "../interfaces/IStablecoin.sol";
 import "../interfaces/IERC2612.sol";
 
 contract FathomStablecoin is IStablecoin, IERC2612, AccessControlUpgradeable {
+    // Custom errors
+    error ZeroAddress();
+    error ERC20PermitExpired();
+    error ERC20PermitInvalidSignature(address recoveredAddress);
+
     bytes32 public constant OWNER_ROLE = DEFAULT_ADMIN_ROLE;
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
 
@@ -198,8 +203,8 @@ contract FathomStablecoin is IStablecoin, IERC2612, AccessControlUpgradeable {
             keccak256(
                 abi.encode(
                     DOMAIN_TYPE_HASH,
-                    keccak256(bytes(sharesName)), // "Fathom Vault" in the example
-                    keccak256(bytes(apiVersion())), // API_VERSION in the example
+                    keccak256(bytes(name)), // Token name 
+                    keccak256(bytes(version)), // Version
                     block.chainid, // Current chain ID
                     address(this) // Address of the contract
                 )
