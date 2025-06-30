@@ -5,6 +5,8 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 contract ERC20Mintable is Ownable, ERC20 {
+    uint8 private _decimals = 18;
+
     constructor(string memory _name, string memory _symbol) ERC20(_name, _symbol) {}
 
     function mint(address _to, uint256 _amount) external onlyOwner {
@@ -13,5 +15,13 @@ contract ERC20Mintable is Ownable, ERC20 {
 
     function burn(address _address, uint256 _amount) public virtual {
         _burn(_address, _amount);
+    }
+
+    function setDecimals(uint8 _newDecimals) external onlyOwner {
+        _decimals = _newDecimals;
+    }
+
+    function decimals() public view override returns (uint8) {
+        return _decimals;
     }
 }

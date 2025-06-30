@@ -35,6 +35,7 @@ contract TieredSpreadLiquidationStrategy is CommonMath, PausableUpgradeable, Ree
         uint256 debtValueToBeLiquidated; // [rad]
         uint256 collateralAmountToBeLiquidated; // [wad]
         uint256 treasuryFees; // [wad]
+        uint256 maxLiquidatableDebtShare; // [wad]
     }
 
     struct LocalVars {
