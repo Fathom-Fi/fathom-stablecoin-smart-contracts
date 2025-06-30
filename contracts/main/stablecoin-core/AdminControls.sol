@@ -69,7 +69,9 @@ contract AdminControls is Initializable {
 
     /// @notice Pause all core modules of the protocol.
     /// @dev This function can only be called by owner or governance role. All related contracts implementing IPausable interface are paused.
-    function pauseProtocol() external onlyOwnerOrGov {
+    function pauseProtocol(
+        address[] calldata _additionalComponents
+    ) external onlyOwnerOrGov {
         IPausable(bookKeeper).pause();
         IPausable(positionManager).pause();
         IPausable(liquidationEngine).pause();
@@ -77,12 +79,19 @@ contract AdminControls is Initializable {
         IPausable(flashMintModule).pause();
         IPausable(priceOracle).pause();
         IPausable(stablecoinAdapter).pause();
+
+        for (uint256 i = 0; i < _additionalComponents.length; i++) {
+            IPausable(_additionalComponents[i]).pause();
+        }
+
         emit LogPauseProtocol();
     }
 
     /// @notice Unpause all core modules of the protocol.
     /// @dev This function can only be called by owner or governance role. All related contracts implementing IPausable interface are unpaused.
-    function unpauseProtocol() external onlyOwnerOrGov {
+    function unpauseProtocol(
+        address[] calldata _additionalComponents
+    ) external onlyOwnerOrGov {
         IPausable(bookKeeper).unpause();
         IPausable(positionManager).unpause();
         IPausable(liquidationEngine).unpause();
@@ -90,6 +99,11 @@ contract AdminControls is Initializable {
         IPausable(flashMintModule).unpause();
         IPausable(priceOracle).unpause();
         IPausable(stablecoinAdapter).unpause();
+
+        for (uint256 i = 0; i < _additionalComponents.length; i++) {
+            IPausable(_additionalComponents[i]).unpause();
+        }
+
         emit LogUnpauseProtocol();
     }
 

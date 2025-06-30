@@ -13,9 +13,11 @@ const deployFixtures = async () => {
   const mockedVault = await smock.fake("Vault");
 
   const mockedBookKeeper = await smock.fake("BookKeeper");
+  
+  // Create a smock fake token for proper mocking
   const mockedToken = await smock.fake("ERC20Mintable");
+  mockedToken.decimals.returns(9);
 
-  mockedToken.decimals.returns(18);
   mockedAccessControlConfig.OWNER_ROLE.returns(formatBytes32String("OWNER_ROLE"));
   mockedAccessControlConfig.GOV_ROLE.returns(formatBytes32String("GOV_ROLE"));
   mockedAccessControlConfig.SHOW_STOPPER_ROLE.returns(formatBytes32String("SHOW_STOPPER_ROLE"));

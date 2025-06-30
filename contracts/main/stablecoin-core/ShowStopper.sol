@@ -109,7 +109,11 @@ contract ShowStopper is CommonMath, IShowStopper, Initializable {
     ///  - Pause LiquidationEngine: positions will not be liquidated.
     ///  - Pause SystemDebtEngine: no accrual of new debt, no system debt settlement.
     ///  - Pause PriceOracle: no new price updates, no liquidation trigger.
-    function cage(uint256 _cageCoolDown) external onlyOwner {
+    ///  - Pause all additional components specified in the calldata.
+    function cage(
+        uint256 _cageCoolDown,
+        address[] calldata _additionalComponents
+    ) external onlyOwner {
         require(live == 1, "ShowStopper/not-live");
         require(_cageCoolDown >= 1 weeks && _cageCoolDown <= 13 weeks, "ShowStopper/invalid-cool-down");
 
@@ -120,6 +124,11 @@ contract ShowStopper is CommonMath, IShowStopper, Initializable {
         ICagable(address(liquidationEngine)).cage();
         ICagable(address(systemDebtEngine)).cage();
         ICagable(address(priceOracle)).cage();
+
+        for (uint256 i = 0; i < _additionalComponents.length; i++) {
+            ICagable(_additionalComponents[i]).cage();
+        }
+
         emit LogCage(_cageCoolDown);
     }
 

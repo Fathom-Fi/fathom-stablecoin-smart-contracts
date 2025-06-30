@@ -60,7 +60,27 @@ contract TokenAdapter is PausableUpgradeable, ReentrancyGuardUpgradeable, IGener
         collateralPoolId = _collateralPoolId;
         collateralToken = _collateralToken;
         decimals = IToken(_collateralToken).decimals();
-        require(decimals == 18, "TokenAdapter/bad-token-decimals");
+        require(decimals <= 18, "TokenAdapter/decimals-too-high");
+    }
+
+    /// @dev Convert token amount to WAD (18 decimals)
+    /// @param _amount Token amount in native decimals
+    /// @return WAD amount (18 decimals)
+    function _convertToWad(uint256 _amount) internal view returns (uint256) {
+        if (decimals == 18) {
+            return _amount;
+        }
+        return _amount * (10 ** (18 - decimals));
+    }
+
+    /// @dev Convert WAD amount to token native decimals
+    /// @param _wadAmount Amount in WAD (18 decimals)
+    /// @return Token amount in native decimals
+    function _convertFromWad(uint256 _wadAmount) internal view returns (uint256) {
+        if (decimals == 18) {
+            return _wadAmount;
+        }
+        return _wadAmount / (10 ** (18 - decimals));
     }
 
     /// @dev Cage function halts TokenAdapter contract for good.
@@ -72,30 +92,45 @@ contract TokenAdapter is PausableUpgradeable, ReentrancyGuardUpgradeable, IGener
         }
     }
 
-    function deposit(address _usr, uint256 _wad, bytes calldata /* data */) external override nonReentrant whenNotPaused {
+    function deposit(address _usr, uint256 _amount, bytes calldata /* data */) external override nonReentrant whenNotPaused {
         require(_usr != address(0), "TokenAdapter/deposit-address(0)");
         require(live == 1, "TokenAdapter/not-live");
-        require(int256(_wad) > 0, "TokenAdapter/overflow");
-        bookKeeper.addCollateral(collateralPoolId, _usr, int256(_wad));
+        
+        // Check for overflow before conversion
+        require(_amount <= uint256(type(int256).max), "TokenAdapter/overflow");
+        
+        // Convert token amount to WAD for BookKeeper
+        uint256 _wadAmount = _convertToWad(_amount);
+        require(int256(_wadAmount) > 0, "TokenAdapter/overflow");
+        
+        bookKeeper.addCollateral(collateralPoolId, _usr, int256(_wadAmount));
 
-        // Move the actual token
-        address(collateralToken).safeTransferFrom(msg.sender, address(this), _wad);
+        // Move the actual token (in native decimals)
+        address(collateralToken).safeTransferFrom(msg.sender, address(this), _amount);
     }
 
-    function withdraw(address _usr, uint256 _wad, bytes calldata /* data */) external override nonReentrant whenNotPaused {
-        require(int256(_wad) > 0, "TokenAdapter/overflow");
-        bookKeeper.addCollateral(collateralPoolId, msg.sender, -int256(_wad));
+    function withdraw(address _usr, uint256 _amount, bytes calldata /* data */) external override nonReentrant whenNotPaused {
+        // Check for overflow before conversion
+        require(_amount <= uint256(type(int256).max), "TokenAdapter/overflow");
+        
+        // Convert token amount to WAD for BookKeeper operations  
+        uint256 _wadAmount = _convertToWad(_amount);
+        require(int256(_wadAmount) > 0, "TokenAdapter/overflow");
+        
+        bookKeeper.addCollateral(collateralPoolId, msg.sender, -int256(_wadAmount));
 
-        address(collateralToken).safeTransfer(_usr, _wad);
+        address(collateralToken).safeTransfer(_usr, _amount);
     }
 
     function emergencyWithdraw(address _to) external nonReentrant {
         require(_to != address(0), "TokenAdapter/emergency-address(0)");
         if (live == 0) {
-            uint256 _amount = bookKeeper.collateralToken(collateralPoolId, msg.sender);
-            bookKeeper.addCollateral(collateralPoolId, msg.sender, -int256(_amount));
+            uint256 _wadAmount = bookKeeper.collateralToken(collateralPoolId, msg.sender);
+            bookKeeper.addCollateral(collateralPoolId, msg.sender, -int256(_wadAmount));
 
-            address(collateralToken).safeTransfer(_to, _amount);
+            // Convert WAD amount back to token native decimals for transfer
+            uint256 _tokenAmount = _convertFromWad(_wadAmount);
+            address(collateralToken).safeTransfer(_to, _tokenAmount);
         }
     }
 

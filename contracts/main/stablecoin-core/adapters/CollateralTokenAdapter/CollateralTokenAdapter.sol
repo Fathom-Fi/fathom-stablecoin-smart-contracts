@@ -9,27 +9,45 @@ import "../../../interfaces/ICollateralAdapter.sol";
 import "../../../interfaces/ICagable.sol";
 import "../../../interfaces/IProxyRegistry.sol";
 import "../../../interfaces/IVault.sol";
+import "../../../interfaces/IGenericTokenAdapter.sol";
+import "../../../interfaces/IToken.sol";
 import "../../../utils/SafeToken.sol";
 import "../../../utils/CommonMath.sol";
 
 /// @title CollateralTokenAdapter
 /// @dev receives collateral from users and deposit in Vault.
-contract CollateralTokenAdapter is CommonMath, ICollateralAdapter, PausableUpgradeable, ReentrancyGuardUpgradeable, ICagable {
+contract CollateralTokenAdapter is CommonMath, IGenericTokenAdapter, ICollateralAdapter, PausableUpgradeable, ReentrancyGuardUpgradeable, ICagable {
     using SafeToken for address;
 
     uint256 public live;
     bool public flagVault;
 
-    address public collateralToken;
+    address private _collateralToken;
     IBookKeeper public bookKeeper;
-    bytes32 public override collateralPoolId;
+    bytes32 private _collateralPoolId;
 
     IVault public vault;
 
     IProxyRegistry public proxyWalletFactory;
 
+    /// @dev decimals of the collateral token
+    uint256 private _decimals;
+
     /// @dev Total CollateralTokens that has been staked in WAD
     uint256 public totalShare;
+
+    // Explicit getter functions to implement both interfaces
+    function collateralToken() external view override(IGenericTokenAdapter) returns (address) {
+        return _collateralToken;
+    }
+
+    function collateralPoolId() external view override(ICollateralAdapter, IGenericTokenAdapter) returns (bytes32) {
+        return _collateralPoolId;
+    }
+
+    function decimals() external view override(IGenericTokenAdapter) returns (uint256) {
+        return _decimals;
+    }
 
     mapping(address => bool) public whiteListed;
 
@@ -64,22 +82,45 @@ contract CollateralTokenAdapter is CommonMath, ICollateralAdapter, PausableUpgra
         _disableInitializers();
     }
 
-    function initialize(address _bookKeeper, bytes32 _collateralPoolId, address _collateralToken, address _proxyWalletFactory) external initializer {
+    function initialize(address _bookKeeperAddress, bytes32 _poolId, address _tokenAddress, address _walletFactory) external initializer {
         // 1. Initialized all dependencies
         PausableUpgradeable.__Pausable_init();
         ReentrancyGuardUpgradeable.__ReentrancyGuard_init();
 
-        require(_bookKeeper != address(0), "CollateralTokenAdapter/zero-book-keeper");
-        require(_collateralPoolId != bytes32(0), "CollateralTokenAdapter/zero-collateral-pool-id");
-        require(_collateralToken != address(0), "CollateralTokenAdapter/zero-collateral-token");
-        require(_proxyWalletFactory != address(0), "CollateralTokenAdapter/zero-proxy-wallet-factory");
+        require(_bookKeeperAddress != address(0), "CollateralTokenAdapter/zero-book-keeper");
+        require(_poolId != bytes32(0), "CollateralTokenAdapter/zero-collateral-pool-id");
+        require(_tokenAddress != address(0), "CollateralTokenAdapter/zero-collateral-token");
+        require(_walletFactory != address(0), "CollateralTokenAdapter/zero-proxy-wallet-factory");
 
         live = 1;
 
-        collateralPoolId = _collateralPoolId;
-        collateralToken = _collateralToken;
-        bookKeeper = IBookKeeper(_bookKeeper);
-        proxyWalletFactory = IProxyRegistry(_proxyWalletFactory);
+        _collateralPoolId = _poolId;
+        _collateralToken = _tokenAddress;
+        bookKeeper = IBookKeeper(_bookKeeperAddress);
+        proxyWalletFactory = IProxyRegistry(_walletFactory);
+        
+        _decimals = IToken(_tokenAddress).decimals();
+        require(_decimals <= 18, "CollateralTokenAdapter/decimals-too-high");
+    }
+
+    /// @dev Convert token amount to WAD (18 decimals)
+    /// @param _amount Token amount in native decimals
+    /// @return WAD amount (18 decimals)
+    function _convertToWad(uint256 _amount) internal view returns (uint256) {
+        if (_decimals == 18) {
+            return _amount;
+        }
+        return _amount * (10 ** (18 - _decimals));
+    }
+
+    /// @dev Convert WAD amount to token native decimals
+    /// @param _wadAmount Amount in WAD (18 decimals)
+    /// @return Token amount in native decimals
+    function _convertFromWad(uint256 _wadAmount) internal view returns (uint256) {
+        if (_decimals == 18) {
+            return _wadAmount;
+        }
+        return _wadAmount / (10 ** (18 - _decimals));
     }
 
     /// @notice Adds an address to the whitelist, allowing it to interact with the contract
@@ -136,25 +177,27 @@ contract CollateralTokenAdapter is CommonMath, ICollateralAdapter, PausableUpgra
     }
 
     /// @param _positionAddress The address that holding states of the position
-    /// @param _amount The collateral token amount that being used as a collateral and to be staked to AnkrStakingPool
+    /// @param _amount The collateral amount in token's native decimals to be deposited
     /// @param _data The extra data that may needs to execute the deposit
     function deposit(
         address _positionAddress,
         uint256 _amount,
         bytes calldata _data
-    ) external override nonReentrant whenNotPaused onlyProxyWalletOrWhiteListed {
+    ) external override(ICollateralAdapter, IGenericTokenAdapter) nonReentrant whenNotPaused onlyProxyWalletOrWhiteListed {
         require(_positionAddress != address(0), "CollateralTokenAdapter/deposit-address(0)");
+        require(_amount > 0, "CollateralTokenAdapter/zero-amount");
         _deposit(_positionAddress, _amount, _data);
     }
 
     /// @dev Withdraw collateralToken from Vault
     /// @param _usr The address that holding states of the position
-    /// @param _amount The collateralToken amount in Vault to be returned to proxyWallet and then to user
+    /// @param _amount The collateral amount in token's native decimals to be withdrawn
     function withdraw(
         address _usr,
         uint256 _amount,
         bytes calldata /* _data */
-    ) external override nonReentrant whenNotPaused onlyProxyWalletOrWhiteListed {
+    ) external override(ICollateralAdapter, IGenericTokenAdapter) nonReentrant whenNotPaused onlyProxyWalletOrWhiteListed {
+        require(_amount > 0, "CollateralTokenAdapter/zero-amount");
         _withdraw(_usr, _amount);
     }
 
@@ -165,17 +208,21 @@ contract CollateralTokenAdapter is CommonMath, ICollateralAdapter, PausableUpgra
     function emergencyWithdraw(address _to) external nonReentrant {
         require(_to != address(0), "CollateralTokenAdapter/emergency-address(0)");
         if (live == 0) {
-            uint256 _amount = bookKeeper.collateralToken(collateralPoolId, msg.sender);
-            require(_amount < 2 ** 255, "CollateralTokenAdapter/collateral-overflow");
-            //deduct totalShare
-            totalShare -= _amount;
+            uint256 _wadAmount = bookKeeper.collateralToken(_collateralPoolId, msg.sender);
+            require(_wadAmount < 2 ** 255, "CollateralTokenAdapter/collateral-overflow");
+            
+            // Convert WAD amount to token native decimals for withdrawal
+            uint256 _tokenAmount = _convertFromWad(_wadAmount);
+            
+            //deduct totalShare (in WAD)
+            totalShare -= _wadAmount;
 
-            //deduct emergency withdrawal amount of FXD
-            bookKeeper.addCollateral(collateralPoolId, msg.sender, -int256(_amount));
-            //withdraw collateralToken from Vault
-            vault.withdraw(_amount);
-            //Transfer collateralToken to msg.sender
-            address(collateralToken).safeTransfer(_to, _amount);
+            //deduct emergency withdrawal amount (in WAD)
+            bookKeeper.addCollateral(_collateralPoolId, msg.sender, -int256(_wadAmount));
+            //withdraw collateralToken from Vault (native decimals)
+            vault.withdraw(_tokenAmount);
+            //Transfer collateralToken to msg.sender (native decimals)
+            address(_collateralToken).safeTransfer(_to, _tokenAmount);
             emit LogEmergencyWithdraw(msg.sender, _to);
         }
     }
@@ -183,42 +230,52 @@ contract CollateralTokenAdapter is CommonMath, ICollateralAdapter, PausableUpgra
     /// @dev Lock collateral token in the vault
     /// deposit collateral tokens to staking contract, and update BookKeeper
     /// @param _positionAddress The position address to be updated
-    /// @param _amount The amount to be deposited
-    function _deposit(address _positionAddress, uint256 _amount, bytes calldata /* _data */) private {
+    /// @param _tokenAmount The amount to be deposited (in token's native decimals)
+    function _deposit(address _positionAddress, uint256 _tokenAmount, bytes calldata /* _data */) private {
         require(live == 1, "CollateralTokenAdapter/not-live");
-        if (_amount > 0) {
-            // Overflow check for int256(wad) cast below
-            // Also enforces a non-zero wad
-            require(int256(_amount) > 0, "CollateralTokenAdapter/amount-overflow");
-            //transfer collateralToken from proxyWallet to adapter
-            address(collateralToken).safeTransferFrom(msg.sender, address(this), _amount);
-            //bookKeeping
-            bookKeeper.addCollateral(collateralPoolId, _positionAddress, int256(_amount));
-            totalShare += _amount;
-
-            // safeApprove to Vault
-            address(collateralToken).safeApprove(address(vault), _amount);
-            //deposit collateralToken to Vault
-            vault.deposit(_amount);
-            emit LogDeposit(_amount); // collateralToken
+        if (_tokenAmount > 0) {
+            // Overflow check for int256 cast below
+            require(int256(_tokenAmount) > 0, "CollateralTokenAdapter/amount-overflow");
+            
+            // Convert token native decimals to WAD for BookKeeper
+            uint256 _wadAmount = _convertToWad(_tokenAmount);
+            require(int256(_wadAmount) > 0, "CollateralTokenAdapter/wad-overflow");
+            
+            //transfer collateralToken from proxyWallet to adapter (native decimals)
+            address(_collateralToken).safeTransferFrom(msg.sender, address(this), _tokenAmount);
+            
+            //bookKeeping - pass WAD amount to BookKeeper
+            bookKeeper.addCollateral(_collateralPoolId, _positionAddress, int256(_wadAmount));
+            totalShare += _wadAmount; // totalShare is in WAD
+            
+            // safeApprove to Vault (native decimals)
+            address(_collateralToken).safeApprove(address(vault), _tokenAmount);
+            //deposit collateralToken to Vault (native decimals)
+            vault.deposit(_tokenAmount);
+            emit LogDeposit(_tokenAmount); // collateralToken (native decimals)
         }
     }
 
     /// @dev withdraw collateral tokens from staking contract, and update BookKeeper
     /// @param _usr The position address to be updated
-    /// @param _amount The amount to be withdrawn
-    function _withdraw(address _usr, uint256 _amount) private {
-        if (_amount > 0) {
-            require(int256(_amount) > 0, "CollateralTokenAdapter/amount-overflow");
-            require(bookKeeper.collateralToken(collateralPoolId, msg.sender) >= _amount, "CollateralTokenAdapter/insufficient collateral amount");
-            bookKeeper.addCollateral(collateralPoolId, msg.sender, -int256(_amount));
-            totalShare -= _amount;
+    /// @param _tokenAmount The amount to be withdrawn (in token's native decimals)
+    function _withdraw(address _usr, uint256 _tokenAmount) private {
+        if (_tokenAmount > 0) {
+            require(int256(_tokenAmount) > 0, "CollateralTokenAdapter/amount-overflow");
+            
+            // Convert token native decimals to WAD for BookKeeper operations
+            uint256 _wadAmount = _convertToWad(_tokenAmount);
+            require(bookKeeper.collateralToken(_collateralPoolId, msg.sender) >= _wadAmount, "CollateralTokenAdapter/insufficient collateral amount");
+            
+            // Update BookKeeper with WAD amount
+            bookKeeper.addCollateral(_collateralPoolId, msg.sender, -int256(_wadAmount));
+            totalShare -= _wadAmount; // totalShare is in WAD
 
-            //withdraw collateralToken from Vault
-            vault.withdraw(_amount);
-            //Transfer collateralToken to proxyWallet
-            collateralToken.safeTransfer(_usr, _amount);
-            emit LogWithdraw(_amount);
+            //withdraw collateralToken from Vault (native decimals)
+            vault.withdraw(_tokenAmount);
+            //Transfer collateralToken to proxyWallet (native decimals)
+            address(_collateralToken).safeTransfer(_usr, _tokenAmount);
+            emit LogWithdraw(_tokenAmount); // native decimals
         }
     }
 }
