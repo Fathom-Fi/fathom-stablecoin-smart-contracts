@@ -116,6 +116,15 @@ contract MockFathomStablecoin is IStablecoin, AccessControlUpgradeable {
         transferFrom(_src, _dst, _wad);
     }
 
+    /// @notice Change the name of the token to `_name`.
+    /// @dev Only callable by the owner.
+    /// @param _name The new name of the token.
+    function rename(string memory _name) external override {
+        require(hasRole(OWNER_ROLE, msg.sender), "!OWNER_ROLE");
+        name = _name;
+        emit Rename(_name);
+    }
+
     /// @notice Transfer `_wad` amount of tokens from `_src` to `_dst`.
     /// @param _src The address to transfer tokens from.
     /// @param _dst The address to transfer tokens to.
